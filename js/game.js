@@ -1,540 +1,505 @@
-/**
- * 最后一位维护员 × bug大乱斗 — MVP
- * Core loop: notice anomaly → check logs/config → locate cause → Fix | Exploit
- */
+/** DOM orchestration only: simulation, data, movement, and art live in their own modules. */
+import { LEVELS, ENDINGS, getLevel } from './levels.js';
+import { createState, loadState, saveState, clearSave, getStats, getEnding, choose } from './state.js';
+import { WORLD, SITES, NPCS, WorldRenderer, getNearby, getRegion, isBlocked, getNPCPosition } from './world.js';
+import { Player } from './player.js';
 
-const LEVELS = [
-  {
-    id: 1,
-    emoji: "🪙",
-    name: "负金币铺",
-    place: "杂货铺",
-    bug: "int16 溢出",
-    anomaly: "顾客钱包里金币 > 32767 时变成负数，店主反而倒欠钱。",
-    desc: "杂货铺门口排着队。一个背包鼓鼓的旅人结账时，柜台屏幕闪了一下——\n店主一脸懵：「你……你买了面包，我怎么倒欠你 3000 金币？」",
-    logs: [
-      { t: "dim", text: "[ledger] 打开交易流水 ledger.dat" },
-      { t: "out", text: "TX#8821  buyer=旅人  item=面包  gold_before=32760" },
-      { t: "out", text: "TX#8821  gold_delta=+20  → gold_after=-32756" },
-      { t: "err", text: "[WARN] balance < 0，触发「店主债务」分支，退款 3000" },
-      { t: "dim", text: "[hint] 钱包字段类型：int16（范围 -32768 ~ 32767）" },
-    ],
-    config: `// wallet.h
-struct Wallet {
-  int16_t gold;   // ← 坏了：超过 32767 会绕回负数
-  // int32_t gold; // ← 修好：更大的类型
-};`,
-    cause: "金币字段用了 int16。超过 32767 时整数溢出，变成很大的负数，系统判定「店主欠你钱」。",
-    fixText: "把 Wallet.gold 改成 int32（或更大）。溢出不再发生，账本恢复正常。",
-    exploitText: "故意把金币刷到刚好溢出，反复触发「店主债务」退款，薅一笔资源。",
-    fixResult: "类型加宽。杂货铺账本不再翻脸。城市稳定性 +8。",
-    exploitResult: "你摸到溢出边界，连薅三笔退款。口袋鼓了，但街角开始流传「负金币玄学」。城市埋下一颗新雷。稳定性 -5，资源 +。",
-  },
-  {
-    id: 2,
-    emoji: "🕛",
-    name: "午夜折扣门",
-    place: "夜市入口",
-    bug: "只比 HH:MM",
-    anomaly: "过了午夜的限时活动，时间一直停在 23:59，折扣永不结束。",
-    desc: "夜市霓虹还亮着。告示牌写着「23:00–23:59 半价」，可墙上的钟已经指向凌晨两点。\n摊主打着哈欠：「系统说还在活动时间……我也不敢关。」",
-    logs: [
-      { t: "dim", text: "[event] 检查限时活动 night_market_half" },
-      { t: "out", text: "now = 2026-10-26 02:14:33" },
-      { t: "out", text: "window_start = 23:00   window_end = 23:59" },
-      { t: "err", text: "compare(now.HHMM, end.HHMM) → 02:14 < 23:59 ? true  ← 只比了时分！" },
-      { t: "dim", text: "[hint] 日期被丢掉了，跨日之后永远「还在窗内」" },
-    ],
-    config: `// event_scheduler.py
-def in_window(now, start, end):
-    # 坏了：只比 HH:MM，跨日后永远 true
-    return start.HHMM <= now.HHMM <= end.HHMM
-    # 修好：用完整时间戳（含日期）
-    # return start_ts <= now_ts <= end_ts`,
-    cause: "活动判定只比较「时:分」，丢掉了日期。过了午夜，02:14 仍然小于 23:59，折扣永不关。",
-    fixText: "改成完整时间戳（日期+时分秒）比较。午夜一过，活动正常结束。",
-    exploitText: "卡在午夜前后反复进出，用永不关闭的半价把库存搬空。",
-    fixResult: "时间窗用上完整时间戳。夜市准时打烊。稳定性 +8。",
-    exploitResult: "你连刷半价到摊位空货。钱包舒服，日程表开始怀疑人生。稳定性 -5，资源 +。",
-  },
-  {
-    id: 3,
-    emoji: "🚪",
-    name: "半开的门",
-    place: "机房侧门",
-    bug: "竞态条件",
-    anomaly: "两个 NPC 同时开门，门卡在半开，谁也过不去——也封不死。",
-    desc: "机房侧门嗡嗡响。守卫 A 和保洁 B 同时刷卡。门开到一半卡住了，缝宽刚好能挤一只猫。\n告警灯在闪：「DOOR_STATE = HALF_OPEN」。",
-    logs: [
-      { t: "dim", text: "[door] 并发请求" },
-      { t: "out", text: "T0  NPC_A.lock_request()  → acquired? 竞态中…" },
-      { t: "out", text: "T0  NPC_B.lock_request()  → acquired? 竞态中…" },
-      { t: "err", text: "T1  A.set(OPENING)  B.set(CLOSING)  → 合并态 HALF_OPEN" },
-      { t: "dim", text: "[hint] 没有互斥锁，两个写者同时改 door.state" },
-    ],
-    config: `// door_controller.c
-void open_door(Actor *a) {
-  // 坏了：无锁，两人同时写 state
-  door.state = OPENING;
-  door.angle += a->force;
-  // 修好：加互斥锁
-  // lock(&door.mutex);
-  // ... critical section ...
-  // unlock(&door.mutex);
-}`,
-    cause: "开门/关门没有互斥锁。两个 NPC 同时写 door.state，合成了一个不存在的 HALF_OPEN。",
-    fixText: "给门控加锁，同一时刻只允许一个写者。门会完整开或完整关。",
-    exploitText: "趁半开的缝钻进去，绕过门禁，抄近路进机房。",
-    fixResult: "互斥锁就位。侧门恢复「全开或全关」。稳定性 +8。",
-    exploitResult: "你从缝里滑进机房。省了时间，但门控状态机多了一个「幽灵半开」分支。稳定性 -5。",
-  },
-  {
-    id: 4,
-    emoji: "👻",
-    name: "还活着的 Boss",
-    place: "竞技场缓存",
-    bug: "缓存未失效",
-    anomaly: "Boss 已被打倒，地图上仍显示存活，还能再打一次掉落。",
-    desc: "竞技场大屏还在播「Boss 血量 3%」。地上明明躺着战利品箱。\n路人小声说：「我昨天打过了……今天怎么又站起来了？」",
-    logs: [
-      { t: "dim", text: "[cache] 查询 boss:arena_01" },
-      { t: "out", text: "DB  status=DEAD  last_kill=昨天 18:02" },
-      { t: "err", text: "CACHE status=ALIVE  ttl=∞  ← 击杀后未 invalidate" },
-      { t: "out", text: "地图渲染读的是 CACHE，所以 Boss 还在刷" },
-      { t: "dim", text: "[hint] 写库成功，缓存没清" },
-    ],
-    config: `// boss_repo.js
-async function killBoss(id) {
-  await db.update(id, { status: "DEAD" });
-  // 坏了：忘了清缓存
-  // 修好：
-  // await cache.invalidate("boss:" + id);
-}`,
-    cause: "击杀只写了数据库，忘了让缓存失效。地图读的是旧缓存，Boss 看起来还活着。",
-    fixText: "击杀后 invalidate 对应缓存键。地图与数据库一致。",
-    exploitText: "反复「再打一次」已死的 Boss，刷掉落。",
-    fixResult: "缓存失效。竞技场大屏终于黑掉。稳定性 +8。",
-    exploitResult: "你又薅了两轮掉落。背包满了，世界表开始出现重复击杀记录。稳定性 -5，资源 +。",
-  },
-  {
-    id: 5,
-    emoji: "🦘",
-    name: "一跳出界",
-    place: "训练场",
-    bug: "米/厘米混用",
-    anomaly: "角色只跳一下就飞出地图——有的系统用米，有的用厘米。",
-    desc: "训练场的蹦床区。你按了一次跳跃。视野猛地拉远——角色已经在地图外的虚空里缓慢旋转。\n物理日志疯狂刷屏。",
-    logs: [
-      { t: "dim", text: "[physics] 跳跃冲量" },
-      { t: "out", text: "input.jump_force = 120        // 设计意图：120 cm/s" },
-      { t: "err", text: "engine.applyImpulse(120)     // 引擎单位：米 → 当成 120 m/s" },
-      { t: "out", text: "velocity.y = 120 m/s  → 直接飞出 bounding box" },
-      { t: "dim", text: "[hint] 配置写厘米，引擎读米，差了 100 倍" },
-    ],
-    config: `// movement.yaml
-jump_force: 120          # 策划按 cm/s 填的
-# engine.ini
-# units = meters         # 引擎按米解释 → 120 m/s
-# 修好：统一单位，例如全用米：jump_force: 1.2`,
-    cause: "跳跃力配置按厘米写，物理引擎按米读。数值被放大 100 倍，一跳飞出地图。",
-    fixText: "统一单位（全米或全厘米），并把数值换算正确。",
-    exploitText: "保留错误单位，故意一跳跳关，跳过整段路程。",
-    fixResult: "单位对齐。蹦床重新变成蹦床。稳定性 +8。",
-    exploitResult: "你借 120 m/s 直接跳到下一区。捷径爽了，碰撞体开始抱怨。稳定性 -5。",
-  },
-  {
-    id: 6,
-    emoji: "👯",
-    name: "连体分身",
-    place: "角色工坊",
-    bug: "浅拷贝",
-    anomaly: "复制出的角色，打一个两个一起掉血——共享了同一份状态。",
-    desc: "工坊里有一键「复制角色」。你复制出分身去试伤害。\n你给本体喝药，分身也满血；你砍分身一刀，本体捂住了肚子。",
-    logs: [
-      { t: "dim", text: "[clone] Character.copy()" },
-      { t: "out", text: "clone = original  // 赋值 / 浅拷贝" },
-      { t: "err", text: "clone.hp 与 original.hp 指向同一块内存" },
-      { t: "out", text: "damage(clone, 10) → original.hp 同步 -10" },
-      { t: "dim", text: "[hint] 需要深拷贝，各自独立 hp / inventory" },
-    ],
-    config: `// character.ts
-copy(): Character {
-  // 坏了：浅拷贝 / 引用赋值
-  return this;
-  // 或 return { ...this };  // 嵌套的 hp 对象仍共享
-  // 修好：深拷贝
-  // return structuredClone(this);
-}`,
-    cause: "复制角色用了浅拷贝（或直接返回引用）。两个角色共享同一份 hp，伤一个等于伤两个。",
-    fixText: "改成深拷贝，分身拥有独立状态。",
-    exploitText: "利用共享血量：一瓶药奶两个；或者让分身挡刀，本体也……等等那是副作用。选「一药双疗」薅资源。",
-    fixResult: "深拷贝就位。分身终于是分身。稳定性 +8。",
-    exploitResult: "你给分身灌药，本体同步回满。药瓶经济崩溃的前夜。稳定性 -5，资源 +。",
-  },
-];
+const $ = (selector) => document.querySelector(selector);
+const escapeHTML = (value) => String(value).replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const formatTime = (minutes) => `${String(Math.floor(minutes / 60) % 24).padStart(2, '0')}:${String(Math.floor(minutes) % 60).padStart(2, '0')}`;
+const regionNames = ['西街 · 日常的裂缝', '中央街区 · 旧系统的回声', '东岸 · 分身与远方'];
+const keys = new Set();
+const canvas = $('#world');
+const renderer = new WorldRenderer(canvas);
+let saved = loadState();
+let state = saved || createState();
+let player = new Player(state.player);
+let mode = 'title';
+let activeLevel = null;
+let activeTab = 'scene';
+let pendingInteraction = null;
+let elapsed = 0;
+let previousTime = performance.now();
+let hudTimer = 0;
+let saveTimer = 0;
+let near = null;
+let warnedStorage = false;
+const dialogs = [...document.querySelectorAll('dialog')];
+const modalOpen = () => dialogs.some((d) => d.open);
+const unlocked = (id) => getStats(state).total >= (id <= 2 ? 0 : id <= 4 ? 2 : 4);
+const distance = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
+const siteFor = (id) => SITES.find((s) => s.id === Number(id));
 
-const ENDINGS = {
-  allFix: {
-    art: "🛠️",
-    title: "结局 · 守夜人",
-    body: "六处漏洞全部按规范修掉。\n小镇的灯还亮着，日志里只剩心跳。\n没有人回来表扬你——但系统还在，城市还在。\n你仍是最后一位维护员。这就够了。",
-  },
-  allExploit: {
-    art: "🏴‍☠️",
-    title: "结局 · Bug 领主",
-    body: "六处漏洞全被你榨干。\n口袋满了，地图上多了六种「特色现象」。\n城市还在跑，只是每一次重启都更像抽奖。\n你赢得了乱斗——也把自己写进了下一场乱斗。",
-  },
-  mixed: {
-    art: "⚖️",
-    title: "结局 · 实用主义者",
-    body: "有的洞堵上了，有的洞留作后门。\n小镇勉强稳定，你的背包也不空。\n维护员手册不会写这一页——\n但在没人来换班的夜里，这或许是唯一能撑下去的写法。",
-  },
-};
-
-const state = {
-  screen: "title",
-  current: 1,
-  choices: {}, // id -> 'fix' | 'exploit'
-  inspected: {}, // id -> { log, config }
-  phase: "intro", // intro | investigated | decided
-  stability: 80,
-};
-
-// ---- DOM ----
-const $ = (sel) => document.querySelector(sel);
-const terminal = () => $("#terminal");
-const actionsEl = () => document.querySelector("#screen-game .level-actions");
-
-function showScreen(name) {
-  document.querySelectorAll(".screen").forEach((el) => el.classList.remove("active"));
-  $(`#screen-${name}`).classList.add("active");
-  state.screen = name;
+function toast(text, error = false) {
+  const item = document.createElement('div');
+  item.className = `toast${error ? ' error' : ''}`;
+  item.textContent = text;
+  $('#toasts').append(item);
+  while ($('#toasts').children.length > 3) $('#toasts').firstElementChild.remove();
+  setTimeout(() => { item.classList.add('out'); setTimeout(() => item.remove(), 350); }, 3900);
 }
 
-function level() {
-  return LEVELS.find((l) => l.id === state.current);
+function persist() {
+  if (mode === 'title') return;
+  state.player = { x: player.x, y: player.y };
+  const ok = saveState(state);
+  $('#save-indicator').innerHTML = `<i></i> ${ok ? '进度已保存' : '本次进度仅在内存中'}`;
+  if (!ok && !warnedStorage) { warnedStorage = true; toast('浏览器未允许本地存档。当前仍可游玩，关闭页面后进度不会保留。', true); }
 }
 
-function scores() {
-  let fix = 0, exploit = 0;
-  Object.values(state.choices).forEach((c) => {
-    if (c === "fix") fix++;
-    if (c === "exploit") exploit++;
-  });
-  return { fix, exploit };
+function showDialog(id) {
+  keys.clear();
+  player.stop();
+  pendingInteraction = null;
+  const dialog = $(id);
+  if (!dialog.open) dialog.showModal();
 }
 
-function updateScores() {
-  const { fix, exploit } = scores();
-  $("#score-fix").textContent = `修复 ${fix}`;
-  $("#score-exploit").textContent = `利用 ${exploit}`;
-  $("#level-label").textContent = `关卡 ${state.current} / 6`;
-  const s = Math.max(0, Math.min(100, state.stability));
-  const filled = Math.round(s / 10);
-  $("#city-stability").textContent = "█".repeat(filled) + "░".repeat(10 - filled);
-  $("#city-stability-num").textContent = `${s}%`;
+function closeDialog(id) { $(id).close(); }
+
+function startGame(fresh = false) {
+  for (const dialog of dialogs) if (dialog.open) dialog.close();
+  if (fresh) state = createState();
+  else state = loadState() || saved || state;
+  player = new Player(state.player);
+  // Old or manually edited positions must never strand the player inside scenery.
+  if (isBlocked(player.x, player.y, state) || isBlocked(player.x + 8, player.y + 8, state) || isBlocked(player.x - 8, player.y - 8, state)) player = new Player();
+  mode = 'playing';
+  keys.clear();
+  pendingInteraction = null;
+  $('#title-screen').classList.add('hidden');
+  $('#hud').classList.remove('hidden');
+  if (matchMedia('(pointer: coarse)').matches) $('#mobile-controls').classList.remove('hidden');
+  for (const id of ['#btn-map', '#btn-journal']) $(id).disabled = false;
+  persist();
+  updateHUD();
+  canvas.focus({ preventScroll: true });
+  if (getEnding(state) && !state.endingSeen) showEnding();
+  else toast(fresh || !saved ? '你已接班。向北走，到杂货铺看看异常账本。' : '欢迎回来，维护员。上次的脚步与选择都还在。');
 }
 
-function renderMap() {
-  const map = $("#town-map");
-  map.innerHTML = "";
-  LEVELS.forEach((lv) => {
-    const choice = state.choices[lv.id];
-    const unlocked = lv.id === 1 || state.choices[lv.id - 1];
-    const cell = document.createElement("div");
-    cell.className = "town-cell";
-    if (!unlocked) cell.classList.add("locked");
-    if (lv.id === state.current && !choice) cell.classList.add("current");
-    if (choice === "fix") cell.classList.add("done-fix");
-    if (choice === "exploit") cell.classList.add("done-exploit");
-    cell.innerHTML = `
-      <span class="emoji">${lv.emoji}</span>
-      <div class="name">${lv.id}. ${lv.name}</div>
-      <div class="hint">${lv.place} · ${lv.bug}${choice ? (choice === "fix" ? " · 已修复" : " · 已利用") : ""}</div>
-    `;
-    if (unlocked) {
-      cell.addEventListener("click", () => selectLevel(lv.id));
+function returnToTitle() {
+  persist();
+  mode = 'title';
+  keys.clear();
+  player.stop();
+  for (const dialog of dialogs) if (dialog.open) dialog.close();
+  $('#title-screen').classList.remove('hidden');
+  $('#hud').classList.add('hidden');
+  $('#mobile-controls').classList.add('hidden');
+  for (const button of document.querySelectorAll('.toolbelt button')) button.disabled = true;
+  refreshTitle();
+}
+
+function refreshTitle() {
+  saved = loadState();
+  $('#btn-start').classList.toggle('hidden', !!saved);
+  $('#btn-continue').classList.toggle('hidden', !saved);
+  $('#btn-new').classList.toggle('hidden', !saved);
+}
+
+function smallDialog(title, content, actions = [], eyebrow = '小镇日常') {
+  $('#small-title').textContent = title;
+  $('#small-eyebrow').textContent = eyebrow;
+  $('#small-content').textContent = content;
+  $('#small-actions').replaceChildren();
+  for (const [label, callback, primary] of actions) {
+    const button = document.createElement('button');
+    button.className = `button ${primary ? 'primary' : 'secondary'}`;
+    button.textContent = label;
+    button.addEventListener('click', () => { closeDialog('#small-dialog'); callback?.(); });
+    $('#small-actions').append(button);
+  }
+  showDialog('#small-dialog');
+}
+
+function waitUntilMidnight() {
+  state.time = (Math.floor(state.time / 1440) + 1) * 1440 + 10;
+  $('#transition-flash').classList.add('active');
+  setTimeout(() => $('#transition-flash').classList.remove('active'), 450);
+  discoverNearby();
+  persist();
+  updateHUD();
+  toast(`第 ${Math.floor(state.time / 1440) + 1} 天 · 00:10。昨晚的折扣灯仍亮着。`);
+}
+
+function rest() {
+  if (mode !== 'playing' || modalOpen()) return;
+  if (getNearby(player, state)?.type !== 'bench') { toast('西街的路边有张长椅。走近它，就能休息到午夜。'); return; }
+  smallDialog('在长椅上歇一会', '风掠过河面，旧路灯依次亮起。\n要在这里等到下一个午夜吗？', [['继续散步', null, false], ['等到 00:10', waitUntilMidnight, true]], '时间会继续前进');
+}
+
+function discoverNearby() {
+  let changed = false;
+  for (const site of SITES) {
+    if (state.discovered[site.id] || !unlocked(site.id)) continue;
+    if (site.id === 2 && state.time < 1440) continue;
+    if (distance(player, site.terminal) < 146) {
+      state.discovered[site.id] = true;
+      toast(`发现异常 · ${getLevel(site.id).name}。靠近发光终端，按 E 调查。`);
+      changed = true;
     }
-    map.appendChild(cell);
-  });
-}
-
-function clearTerminal() {
-  terminal().innerHTML = "";
-}
-
-function termLine(cls, text) {
-  const div = document.createElement("div");
-  div.className = `line ${cls || ""}`;
-  div.textContent = text;
-  terminal().appendChild(div);
-  terminal().scrollTop = terminal().scrollHeight;
-}
-
-function termPrompt(cmd) {
-  const div = document.createElement("div");
-  div.className = "line";
-  div.innerHTML = `<span class="prompt">maintainer@city:~$</span> <span class="cmd">${escapeHtml(cmd)}</span>`;
-  terminal().appendChild(div);
-}
-
-function escapeHtml(s) {
-  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-}
-
-function ensureInspected() {
-  if (!state.inspected[state.current]) {
-    state.inspected[state.current] = { log: false, config: false };
   }
-  return state.inspected[state.current];
+  if (changed) { persist(); updateHUD(); }
 }
 
-function bothInspected() {
-  const i = ensureInspected();
-  return i.log && i.config;
+function interact(target = getNearby(player, state)) {
+  if (mode !== 'playing' || modalOpen() || !target) return;
+  if (target.type === 'site') {
+    const site = siteFor(target.id);
+    if (!site || distance(player, site.terminal) > 94 || !unlocked(site.id)) return;
+    activeLevel = site.id;
+    activeTab = 'scene';
+    if (activeLevel !== 2 || state.time >= 1440) state.discovered[activeLevel] = true;
+    renderInvestigation();
+    showDialog('#investigation-dialog');
+    persist();
+  } else if (target.type === 'bench') rest();
+  else if (target.type === 'npc') {
+    const npc = NPCS.find((n) => n.id === target.id);
+    if (!npc) return;
+    const lines = npc.lines || ['小镇还在运转。辛苦了，维护员。'];
+    smallDialog(npc.name, lines[Math.floor(elapsed / 11) % lines.length], [['继续巡查', null, true]], '路边的服务机器人');
+  } else if (target.type === 'gate') {
+    const needed = Number(target.id) === 1 ? 2 : 4;
+    smallDialog('桥闸还未开放', `旧电网需要逐区接通。累计处理 ${needed} 处异常后，这座桥就会开放。\n修复与利用都能推进路线。当前已处理 ${getStats(state).total} / 6。`, [['记下了', null, true]], '街区通行提示');
+  }
 }
 
-function renderLevel() {
-  const lv = level();
-  const choice = state.choices[lv.id];
-  $("#scene-title").textContent = `${lv.emoji} ${lv.name}`;
-  $("#scene-desc").textContent = lv.desc;
-  $("#anomaly-box").textContent = `异常：${lv.anomaly}`;
-  $("#panel-scene-header").textContent = `${lv.place} · ${lv.bug}`;
-  $("#code-area").innerHTML = "";
-  $("#result-banner").className = "";
-  $("#result-banner").textContent = "";
-  clearTerminal();
-  termLine("dim", `# 现场接入 · ${lv.place}`);
-  termLine("dim", `# 输入命令或点下方按钮。建议先查日志与配置。`);
-
-  const acts = actionsEl();
-  acts.innerHTML = "";
-
+function renderInvestigation() {
+  const level = getLevel(activeLevel);
+  if (!level) return;
+  const inspected = state.inspected[activeLevel] || {};
+  const choice = state.choices[activeLevel];
+  const waiting = activeLevel === 2 && state.time < 1440;
+  const ready = !!(inspected.logs && inspected.config && !waiting);
+  $('#scene-place').textContent = `现场 ${String(activeLevel).padStart(2, '0')} / 06 · ${level.place}`;
+  $('#scene-title').textContent = level.name;
+  $('#investigation-steps').innerHTML = [[!waiting, '发现异常'], [inspected.logs && inspected.config, '核对日志与配置'], [!!choice, '作出选择']].map(([done, text]) => `<span class="${done ? 'complete' : ''}">${done ? '✓' : '◇'} ${text}</span>`).join('<b>→</b>');
+  for (const tab of ['scene', 'logs', 'config']) {
+    $(`#tab-${tab}`).setAttribute('aria-selected', String(activeTab === tab));
+    $(`#tab-${tab}`).disabled = waiting && tab !== 'scene';
+    const mark = $(`#tab-${tab} span`);
+    if (mark) mark.textContent = inspected[tab] ? '✓' : '';
+  }
+  let content;
+  if (waiting) {
+    content = `<div class="scene-anomaly">告示牌：第 1 天 23:00—23:59，一次性半价。</div><p class="scene-desc">现在是第 ${Math.floor(state.time / 1440) + 1} 天 ${formatTime(state.time)}。异常还未出现。\n在夜市坐一会，亲眼看看跨过午夜后，折扣会不会结束。</p><button class="button primary" id="btn-wait-market" style="margin-top:16px">等到次日 00:10</button>`;
+  } else if (activeTab === 'scene') {
+    content = `<div class="scene-anomaly">${escapeHTML(level.anomaly)}</div><p class="scene-desc">${escapeHTML(level.desc)}</p>`;
+  } else if (activeTab === 'logs') {
+    let rows = level.logs.map((log) => `<span class="log-${log.t}">${escapeHTML(log.text)}</span>`).join('\n');
+    if (activeLevel === 2) rows += `\n<span class="log-err">[实时终端] 第 ${Math.floor(state.time / 1440) + 1} 天 ${formatTime(state.time)} / ${choice === 'fix' ? 'active=false' : 'active=true'} / 原定截止：第 1 天 23:59</span>`;
+    content = `<pre class="terminal">${rows}</pre>`;
+  } else content = `<pre class="terminal">${escapeHTML(level.config)}</pre>`;
+  $('#investigation-content').innerHTML = content;
+  $('#btn-wait-market')?.addEventListener('click', () => { waitUntilMidnight(); state.discovered[2] = true; renderInvestigation(); persist(); });
+  $('#cause-box').classList.toggle('hidden', !ready);
+  $('#cause-box').innerHTML = `<strong>已定位 · ${escapeHTML(level.bug)}</strong>${escapeHTML(level.cause)}<p class="decision-description"><b>修复：</b>${escapeHTML(level.fixText)}<br><b>利用：</b>${escapeHTML(level.exploitText)}</p>`;
+  $('#choice-area').classList.toggle('hidden', !!choice);
+  $('#btn-fix').disabled = !ready || !!choice;
+  $('#btn-exploit').disabled = !ready || !!choice;
+  $('#btn-exploit small').textContent = `稳定性 −5 · 资源 +${level.reward}`;
+  $('#choice-hint').textContent = ready ? '选择会改变现场，并永久记入这一局的维护记录。' : waiting ? '跨过午夜，才能记录这项异常。' : `调查进度：日志${inspected.logs ? '已读' : '未读'} · 配置${inspected.config ? '已读' : '未读'}`;
+  $('#result-box').classList.toggle('hidden', !choice);
+  $('#result-box').classList.toggle('exploited', choice === 'exploit');
   if (choice) {
-    showResult(lv, choice);
-    appendNextButton(acts);
-    updateScores();
-    renderMap();
-    return;
-  }
-
-  // Investigation buttons
-  const btnLog = button("ghost", "查日志 (L)", () => doInspectLog());
-  const btnCfg = button("ghost", "看配置 (C)", () => doInspectConfig());
-  const btnCause = button("ghost", "定位原因", () => doShowCause());
-  acts.append(btnLog, btnCfg, btnCause);
-
-  const btnFix = button("fix", "修复 (F)", () => doChoose("fix"));
-  const btnExploit = button("exploit", "利用 (E)", () => doChoose("exploit"));
-  btnFix.disabled = true;
-  btnExploit.disabled = true;
-  btnFix.id = "btn-fix";
-  btnExploit.id = "btn-exploit";
-  acts.append(btnFix, btnExploit);
-
-  // If already inspected this session revisit
-  const ins = ensureInspected();
-  if (ins.log || ins.config) {
-    maybeUnlockChoices();
-  }
-
-  updateScores();
-  renderMap();
-}
-
-function button(cls, label, onClick) {
-  const b = document.createElement("button");
-  b.type = "button";
-  if (cls) b.className = cls;
-  b.textContent = label;
-  b.addEventListener("click", onClick);
-  return b;
-}
-
-function doInspectLog() {
-  const lv = level();
-  if (state.choices[lv.id]) return;
-  const ins = ensureInspected();
-  termPrompt("tail -n 20 /var/log/city/" + lv.id + ".log");
-  lv.logs.forEach((line) => termLine(line.t, line.text));
-  ins.log = true;
-  maybeUnlockChoices();
-}
-
-function doInspectConfig() {
-  const lv = level();
-  if (state.choices[lv.id]) return;
-  const ins = ensureInspected();
-  termPrompt("cat /etc/city/bug_" + lv.id + ".conf");
-  const pre = document.createElement("pre");
-  pre.className = "code-block";
-  pre.textContent = lv.config;
-  $("#code-area").innerHTML = "";
-  $("#code-area").appendChild(pre);
-  termLine("out", "(配置已显示在下方)");
-  ins.config = true;
-  maybeUnlockChoices();
-}
-
-function doShowCause() {
-  const lv = level();
-  if (state.choices[lv.id]) return;
-  if (!bothInspected()) {
-    termLine("err", "信息不足：请先查日志并看配置，再定位原因。");
-    return;
-  }
-  termPrompt("diagnose --level " + lv.id);
-  termLine("out", "根因：" + lv.cause);
-  maybeUnlockChoices();
-}
-
-function maybeUnlockChoices() {
-  if (!bothInspected()) return;
-  const bf = $("#btn-fix");
-  const be = $("#btn-exploit");
-  if (bf) bf.disabled = false;
-  if (be) be.disabled = false;
-  if (state.phase !== "decided") {
-    termLine("dim", "— 根因已可判定。选择【修复】或【利用】—");
-    state.phase = "investigated";
+    $('#result-box').innerHTML = `<strong>${choice === 'fix' ? '✓ 已修复' : '◆ 已利用'}</strong><br>${escapeHTML(choice === 'fix' ? level.fixResult : level.exploitResult)}<br><button class="button primary" id="btn-result-continue">${getStats(state).total === 6 && !state.endingSeen ? '翻到手记最后一页' : '回到小镇，看看变化'} →</button>`;
+    $('#btn-result-continue').addEventListener('click', () => closeDialog('#investigation-dialog'));
   }
 }
 
-function doChoose(kind) {
-  const lv = level();
-  if (state.choices[lv.id]) return;
-  if (!bothInspected()) {
-    termLine("err", "先查日志、看配置，再做决定。");
-    return;
+function inspect(tab) {
+  if (!$('#investigation-dialog').open || !activeLevel) return;
+  if (activeLevel === 2 && state.time < 1440 && tab !== 'scene') return;
+  activeTab = tab;
+  if (tab === 'logs' || tab === 'config') {
+    state.inspected[activeLevel] ||= {};
+    state.inspected[activeLevel][tab] = true;
+    persist();
   }
-  state.choices[lv.id] = kind;
-  state.phase = "decided";
-  if (kind === "fix") {
-    state.stability = Math.min(100, state.stability + 8);
-    termPrompt("patch --apply " + lv.id);
-    termLine("out", lv.fixText);
-  } else {
-    state.stability = Math.max(0, state.stability - 5);
-    termPrompt("exploit --use " + lv.id);
-    termLine("err", lv.exploitText);
-  }
-  showResult(lv, kind);
-  const acts = actionsEl();
-  // disable choose buttons, keep inspect history
-  acts.querySelectorAll("button").forEach((b) => {
-    if (b.id === "btn-fix" || b.id === "btn-exploit") b.disabled = true;
-  });
-  appendNextButton(acts);
-  updateScores();
-  renderMap();
+  renderInvestigation();
 }
 
-function showResult(lv, kind) {
-  const banner = $("#result-banner");
-  banner.className = "show " + (kind === "fix" ? "fix-result" : "exploit-result");
-  banner.textContent = kind === "fix" ? "✓ " + lv.fixResult : "⚡ " + lv.exploitResult;
-}
-
-function appendNextButton(acts) {
-  if (acts.querySelector("#btn-next")) return;
-  const done = Object.keys(state.choices).length >= 6;
-  const btn = button("primary", done ? "查看结局 (N)" : "下一关 (N)", () => goNext());
-  btn.id = "btn-next";
-  acts.appendChild(btn);
-}
-
-function selectLevel(id) {
-  const unlocked = id === 1 || state.choices[id - 1];
-  if (!unlocked) return;
-  state.current = id;
-  state.phase = state.choices[id] ? "decided" : "intro";
-  renderLevel();
-}
-
-function goNext() {
-  if (Object.keys(state.choices).length >= 6) {
-    showEnding();
-    return;
-  }
-  // next unfinished sequential
-  let next = state.current + 1;
-  while (next <= 6 && state.choices[next]) next++;
-  if (next > 6) {
-    // find any unfinished
-    next = LEVELS.find((l) => !state.choices[l.id])?.id;
-  }
-  if (!next) {
-    showEnding();
-    return;
-  }
-  selectLevel(next);
+function decide(choice) {
+  if (!$('#investigation-dialog').open) return;
+  const before = getStats(state).total;
+  const result = choose(state, activeLevel, choice);
+  if (!result.ok) { toast(result.message, true); return; }
+  persist();
+  renderInvestigation();
+  updateHUD();
+  if (before === 1 || before === 3) toast(before === 1 ? '中央街区的桥闸已开放。沿主路向东继续巡查。' : '东岸已接入电网。最后两处异常正在等待你。');
 }
 
 function showEnding() {
-  const { fix, exploit } = scores();
-  let ending;
-  if (fix === 6) ending = ENDINGS.allFix;
-  else if (exploit === 6) ending = ENDINGS.allExploit;
-  else ending = ENDINGS.mixed;
-
-  $("#ending-art").textContent = ending.art;
-  $("#ending-title").textContent = ending.title;
-  $("#ending-body").textContent = ending.body;
-  $("#ending-stats").textContent =
-    `修复 ${fix} · 利用 ${exploit} · 最终稳定性 ${state.stability}%`;
-  showScreen("ending");
+  const endingKey = getEnding(state);
+  if (!endingKey) return;
+  const ending = ENDINGS[endingKey];
+  const stats = getStats(state);
+  $('#ending-title').textContent = ending.title;
+  $('#ending-body').textContent = ending.body;
+  $('#btn-ending-walk').textContent = endingKey === 'allExploit' ? '回看离开前的小镇' : '再看看这座小镇';
+  $('#ending-art').className = `ending-art ${endingKey === 'allExploit' ? 'collapse' : endingKey === 'mixed' ? 'mixed' : ''}`;
+  $('#ending-stats').innerHTML = `<span>修复 ${stats.fix} 处</span><span>利用 ${stats.exploit} 处</span><span>稳定性 ${state.stability}%</span>`;
+  state.endingSeen = true;
+  persist();
+  showDialog('#ending-dialog');
 }
 
-function startGame() {
-  state.current = 1;
-  state.choices = {};
-  state.inspected = {};
-  state.phase = "intro";
-  state.stability = 80;
-  showScreen("game");
-  renderLevel();
+function updateHUD() {
+  const stats = getStats(state);
+  const clock = state.time % 1440;
+  $('#clock').textContent = formatTime(state.time);
+  $('#day-label').textContent = `第 ${Math.floor(state.time / 1440) + 1} 天 · ${clock >= 360 && clock < 1080 ? '晴' : clock >= 1080 && clock < 1200 ? '黄昏' : '夜'}`;
+  $('#day-icon').textContent = clock >= 360 && clock < 1140 ? '☀' : '☾';
+  $('#stability').textContent = state.stability;
+  $('#stability-meter').style.width = `${state.stability}%`;
+  $('#resources').textContent = state.resources;
+  $('#progress').textContent = stats.total;
+  const region = Math.max(0, Math.min(2, getRegion(player.x)));
+  $('#region-label').textContent = regionNames[region];
+  $('#location-label').textContent = regionNames[region];
+  const next = LEVELS.find((level) => !state.choices[level.id]);
+  if (!next) {
+    $('#quest-title').textContent = '今天的维护结束了';
+    $('#quest-copy').textContent = '每一处变化，都是你留下的选择。打开手记，可以重读最后一页。';
+    $('#quest-step').textContent = `✓ 修复 ${stats.fix} · 利用 ${stats.exploit}`;
+  } else {
+    $('#quest-title').textContent = state.discovered[next.id] ? `调查：${next.name}` : `去${next.place}看看`;
+    const copy = ['沿石路向北，自动柜台的金币好像不太对劲。', '西街南侧的夜市。等到午夜，看看折扣灯有没有熄灭。', '过桥后沿石路向北。机房侧门传来忽开忽关的声音。', '中央街区南侧。已经倒下的 Boss，似乎又站了起来。', '跨过第二座桥，向北走。高台上的测试单元飞得太高了。', '东岸南侧的工坊。两个分身，似乎共享着同一个影子。'];
+    $('#quest-copy').textContent = copy[next.id - 1];
+    const inspected = state.inspected[next.id] || {};
+    $('#quest-step').textContent = inspected.logs && inspected.config ? '◇ 成因已定位 · 作出你的选择' : state.discovered[next.id] ? `◇ 查日志 ${inspected.logs ? '✓' : '○'} · 看配置 ${inspected.config ? '✓' : '○'}` : '◇ 靠近异常，开始调查';
+  }
+  near = getNearby(player, state);
+  $('#interaction-bubble').classList.toggle('hidden', !near || modalOpen());
+  if (near) $('#interaction-label').textContent = near.type === 'site' ? `${state.choices[near.id] ? '查看' : '调查'} · ${getLevel(near.id).name}` : near.type === 'npc' ? '与服务机聊聊' : near.type === 'bench' ? '坐下等到午夜' : '查看桥闸';
+  $('#btn-interact').disabled = mode !== 'playing' || !near;
+  $('#btn-rest').disabled = mode !== 'playing' || near?.type !== 'bench';
+  drawMap($('#minimap'), false);
+  if ($('#map-dialog').open) drawMap($('#large-map'), true);
 }
 
-// ---- Events ----
-$("#btn-start").addEventListener("click", startGame);
-$("#btn-restart").addEventListener("click", () => {
-  showScreen("title");
+function drawMap(mapCanvas, detailed) {
+  const ctx = mapCanvas.getContext('2d');
+  const sx = mapCanvas.width / WORLD.width;
+  const sy = mapCanvas.height / WORLD.height;
+  const stats = getStats(state);
+  ctx.save(); ctx.scale(sx, sy);
+  ctx.fillStyle = '#708f58'; ctx.fillRect(0, 0, WORLD.width, WORLD.height);
+  ctx.fillStyle = '#8da16a'; ctx.fillRect(48, 48, WORLD.width - 96, WORLD.height - 96);
+  ctx.fillStyle = '#beaf80'; ctx.fillRect(48, 548, WORLD.width - 96, 88);
+  for (const x of [400, 960, 1520]) ctx.fillRect(x, 220, 48, 750);
+  for (const x of [560, 1120]) {
+    ctx.fillStyle = '#568c8d'; ctx.fillRect(x, 0, 48, WORLD.height);
+    ctx.fillStyle = '#bfa57a'; ctx.fillRect(x - 8, 548, 64, 88);
+  }
+  for (let i = 0; i < 70; i++) {
+    const x = 66 + ((i * 241 + 37) % 1580), y = 55 + ((i * 131 + 19) % 1030);
+    if (Math.abs(y - 590) < 95 || [424, 984, 1544, 584, 1144].some((a) => Math.abs(x - a) < 65)) continue;
+    ctx.fillStyle = '#607f4d'; ctx.fillRect(x, y, 20, 20);
+  }
+  for (const site of SITES) {
+    const choice = state.choices[site.id];
+    ctx.fillStyle = '#a77b58'; ctx.fillRect(site.x - 90, site.y - 50, 180, 100);
+    ctx.fillStyle = choice === 'fix' ? '#537850' : choice === 'exploit' ? '#a36e8a' : '#cf9b55';
+    ctx.fillRect(site.terminal.x - 16, site.terminal.y - 16, 32, 32);
+    if (detailed) {
+      ctx.fillStyle = '#f7edce'; ctx.fillRect(site.x - 105, site.y + 74, 220, 45);
+      ctx.fillStyle = '#40533a'; ctx.font = '23px sans-serif'; ctx.textAlign = 'center';
+      ctx.fillText(`${site.id} · ${getLevel(site.id).place}`, site.x + 5, site.y + 104);
+    }
+  }
+  if (stats.total < 2) { ctx.fillStyle = '#203b3180'; ctx.fillRect(608, 0, 512, WORLD.height); }
+  if (stats.total < 4) { ctx.fillStyle = '#203b3199'; ctx.fillRect(1168, 0, 560, WORLD.height); }
+  if (detailed) {
+    ctx.font = '25px sans-serif'; ctx.textAlign = 'center'; ctx.fillStyle = '#f8efcf';
+    for (const [x, text] of [[285, '西街'], [860, stats.total < 2 ? '处理 2 处异常后开放' : '中央街区'], [1430, stats.total < 4 ? '处理 4 处异常后开放' : '东岸']]) ctx.fillText(text, x, 110);
+    ctx.fillStyle = '#ebd89d'; ctx.fillRect(246, 567, 30, 20);
+    ctx.font = '20px sans-serif'; ctx.fillStyle = '#f5edcf'; ctx.fillText('休息长椅', 260, 655);
+  }
+  const dot = detailed ? 13 : 19;
+  ctx.fillStyle = '#2b443c'; ctx.fillRect(player.x - dot - 5, player.y - dot - 5, dot * 2 + 10, dot * 2 + 10);
+  ctx.fillStyle = '#fff3d0'; ctx.fillRect(player.x - dot, player.y - dot, dot * 2, dot * 2);
+  ctx.restore();
+}
+
+function openMap() {
+  if (mode !== 'playing') return;
+  if ($('#map-dialog').open) { closeDialog('#map-dialog'); return; }
+  if (modalOpen()) return;
+  drawMap($('#large-map'), true);
+  showDialog('#map-dialog');
+}
+
+function routeTo(x, y, automatic = true) {
+  const hit = SITES.find((site) => distance({ x, y }, site.terminal) < 64 || (Math.abs(x - site.x) < 104 && y > site.y - 120 && y <= site.y + 38));
+  if (hit) {
+    if (!unlocked(hit.id)) { toast(`这片街区还未开放。先处理 ${hit.id <= 4 ? 2 : 4} 处异常。`); return false; }
+    const target = { type: 'site', id: hit.id };
+    if (distance(player, hit.terminal) <= 90) { interact(target); return true; }
+    if (player.setTarget(hit.terminal.x, hit.terminal.y + 22, state)) { pendingInteraction = automatic ? target : null; return true; }
+  } else if (player.setTarget(x, y, state)) { pendingInteraction = null; return true; }
+  toast('这里暂时走不到。试试沿石路、从桥上过去。');
+  return false;
+}
+
+function openJournal() {
+  if (mode !== 'playing') return;
+  if ($('#journal-dialog').open) { closeDialog('#journal-dialog'); return; }
+  if (modalOpen()) return;
+  $('#journal-list').innerHTML = LEVELS.map((level) => {
+    const choice = state.choices[level.id];
+    const record = state.inspected[level.id] || {};
+    const status = choice ? choice === 'fix' ? '✓ 已修复 · 稳定性 +8' : `◆ 已利用 · 资源 +${level.reward}` : !unlocked(level.id) ? '桥闸未开放' : state.discovered[level.id] ? `已发现 · 日志 ${record.logs ? '✓' : '○'} / 配置 ${record.config ? '✓' : '○'}` : '待前往现场';
+    return `<article class="journal-entry"><span class="journal-number">0${level.id}</span><div><h3>${escapeHTML(level.name)}</h3><p>${escapeHTML(level.place)}${record.logs && record.config ? ` · ${escapeHTML(level.bug)}` : ''}</p><span class="journal-status">${status}</span></div><button data-route="${level.id}" ${!unlocked(level.id) ? 'disabled' : ''}>前往 →</button></article>`;
+  }).join('');
+  const stats = getStats(state);
+  $('#journal-footer').innerHTML = `修复 ${stats.fix} · 利用 ${stats.exploit} · 资源 ${state.resources}${getEnding(state) ? '<br><button class="text-button" id="btn-review-ending">重读最后一页</button>' : '<br>每个选择都能继续前进，也都会留下一些改变。'}`;
+  for (const button of document.querySelectorAll('[data-route]')) button.addEventListener('click', () => {
+    const terminal = siteFor(button.dataset.route).terminal;
+    closeDialog('#journal-dialog');
+    routeTo(terminal.x, terminal.y);
+  });
+  $('#btn-review-ending')?.addEventListener('click', () => { closeDialog('#journal-dialog'); showEnding(); });
+  showDialog('#journal-dialog');
+}
+
+function showHelp() {
+  smallDialog('维护员口袋手册', 'WASD / 方向键：移动　Shift：冲刺\n点击地面：自动绕路步行；点击终端：走近调查\nE / 空格：互动　M：地图　J：手记\n调查中 L：日志　C：配置　F：修复　X：利用\nEsc：关闭面板\n\n先走近看见异常，再读日志与配置，最后作出选择。每处理两处异常，东边的桥闸就会开放。\n\n时间每秒推进 4 分钟，读面板时暂停。西街长椅和夜市可等到午夜。进度自动保存在当前浏览器。', [['知道了', null, true]], '背好工具，沿着石路出发');
+}
+
+$('#btn-start').addEventListener('click', () => startGame(true));
+$('#btn-continue').addEventListener('click', () => startGame());
+$('#btn-new').addEventListener('click', () => smallDialog('开启新的维护记录', '新的一局会覆盖这台浏览器中的小镇进度。已做出的选择将重新开始。', [['保留旧记录', null, false], ['开始新的一局', () => { clearSave(); saved = null; startGame(true); }, true]], '重新接班'));
+$('#btn-help').addEventListener('click', () => { if (!modalOpen()) showHelp(); });
+$('#brand-home').addEventListener('click', (event) => { event.preventDefault(); if (!modalOpen()) showHelp(); });
+$('#btn-fullscreen').addEventListener('click', async () => { try { if (document.fullscreenElement) await document.exitFullscreen(); else await document.documentElement.requestFullscreen(); } catch { toast('当前浏览器未开放全屏；可以继续窗口游玩。'); } });
+$('#btn-interact').addEventListener('click', () => interact());
+$('#btn-rest').addEventListener('click', rest);
+for (const id of ['#btn-map', '#btn-minimap']) $(id).addEventListener('click', openMap);
+$('#btn-journal').addEventListener('click', openJournal);
+$('#btn-close-dialog').addEventListener('click', () => closeDialog('#investigation-dialog'));
+for (const button of document.querySelectorAll('[data-close]')) button.addEventListener('click', () => closeDialog(`#${button.dataset.close}`));
+for (const tab of ['scene', 'logs', 'config']) $(`#tab-${tab}`).addEventListener('click', () => inspect(tab));
+$('#btn-fix').addEventListener('click', () => decide('fix'));
+$('#btn-exploit').addEventListener('click', () => decide('exploit'));
+$('#btn-title').addEventListener('click', returnToTitle);
+$('#btn-ending-walk').addEventListener('click', () => closeDialog('#ending-dialog'));
+for (const dialog of dialogs) dialog.addEventListener('close', () => {
+  keys.clear();
+  if (mode === 'playing') {
+    canvas.focus({ preventScroll: true });
+    updateHUD();
+    // Also catches Escape on the final result; the ending cannot accidentally be skipped.
+    if (getEnding(state) && !state.endingSeen) queueMicrotask(() => { if (!modalOpen() && mode === 'playing') showEnding(); });
+  }
 });
 
-document.addEventListener("keydown", (e) => {
-  if (e.target.matches("input, textarea")) return;
-  const key = e.key.toLowerCase();
-
-  if (state.screen === "title" && (key === "enter" || key === " ")) {
-    e.preventDefault();
-    startGame();
-    return;
-  }
-  if (state.screen === "ending" && (key === "enter" || key === "r")) {
-    showScreen("title");
-    return;
-  }
-  if (state.screen !== "game") return;
-
-  if (key >= "1" && key <= "6") {
-    selectLevel(Number(key));
-    return;
-  }
-  if (key === "l") doInspectLog();
-  if (key === "c") doInspectConfig();
-  if (key === "f") {
-    const bf = $("#btn-fix");
-    if (bf && !bf.disabled) doChoose("fix");
-  }
-  if (key === "e") {
-    const be = $("#btn-exploit");
-    if (be && !be.disabled) doChoose("exploit");
-  }
-  if (key === "n") {
-    if (state.choices[state.current]) goNext();
-  }
+canvas.addEventListener('pointerdown', (event) => {
+  if (mode !== 'playing' || modalOpen()) return;
+  const point = renderer.screenToWorld(event.clientX, event.clientY);
+  const npc = NPCS.find((n) => distance(getNPCPosition(n, elapsed * 1000), point) < 27);
+  const current = getNearby(player, state);
+  if (npc && current?.type === 'npc' && current.id === npc.id) { interact(current); return; }
+  if (distance(point, { x: 260, y: 580 }) < 35 && current?.type === 'bench') { rest(); return; }
+  routeTo(point.x, point.y);
+});
+$('#large-map').addEventListener('click', (event) => {
+  const rect = event.currentTarget.getBoundingClientRect();
+  const x = ((event.clientX - rect.left) / rect.width) * WORLD.width;
+  const y = ((event.clientY - rect.top) / rect.height) * WORLD.height;
+  closeDialog('#map-dialog');
+  routeTo(x, y);
 });
 
-// boot
-showScreen("title");
+const movementCodes = new Set(['KeyW','KeyA','KeyS','KeyD','ArrowUp','ArrowDown','ArrowLeft','ArrowRight','ShiftLeft','ShiftRight']);
+document.addEventListener('keydown', (event) => {
+  if (['Space','ArrowUp','ArrowDown','ArrowLeft','ArrowRight'].includes(event.code)) event.preventDefault();
+  if (event.repeat && !movementCodes.has(event.code)) return;
+  if (event.code === 'Escape') { if (!modalOpen()) { player.stop(); pendingInteraction = null; } return; }
+  if (modalOpen()) {
+    if ($('#investigation-dialog').open) {
+      if (event.code === 'KeyL') inspect('logs');
+      if (event.code === 'KeyC') inspect('config');
+      if (event.code === 'KeyF') decide('fix');
+      if (event.code === 'KeyX') decide('exploit');
+    }
+    return;
+  }
+  if (mode === 'title') { if (event.code === 'Enter') startGame(!saved); return; }
+  if (movementCodes.has(event.code)) { keys.add(event.code); if (!event.code.startsWith('Shift')) pendingInteraction = null; }
+  if (event.code === 'KeyE' || event.code === 'Space') interact();
+  if (event.code === 'KeyM') openMap();
+  if (event.code === 'KeyJ') openJournal();
+  if (debug && /^Digit[1-6]$/.test(event.code)) debug.teleport(Number(event.code.slice(-1)));
+  if (debug && event.code === 'KeyT') waitUntilMidnight();
+});
+document.addEventListener('keyup', (event) => keys.delete(event.code));
+window.addEventListener('blur', () => { keys.clear(); player.stop(); pendingInteraction = null; persist(); });
+document.addEventListener('visibilitychange', () => { if (document.hidden) { keys.clear(); persist(); } previousTime = performance.now(); });
+window.addEventListener('pagehide', persist);
+for (const button of document.querySelectorAll('[data-move]')) {
+  button.addEventListener('pointerdown', (event) => { if (modalOpen()) return; event.preventDefault(); button.setPointerCapture(event.pointerId); keys.add(button.dataset.move); pendingInteraction = null; });
+  for (const name of ['pointerup','pointercancel','lostpointercapture']) button.addEventListener(name, () => keys.delete(button.dataset.move));
+}
+
+function resize() {
+  const bounds = canvas.getBoundingClientRect();
+  const logicalHeight = 600;
+  renderer.resize(Math.round(logicalHeight * bounds.width / bounds.height), logicalHeight);
+}
+new ResizeObserver(resize).observe($('.game-frame'));
+resize();
+
+function frame(now) {
+  const dt = Math.min(.05, Math.max(0, (now - previousTime) / 1000));
+  previousTime = now;
+  if (!document.hidden) {
+    elapsed += dt;
+    if (mode === 'playing' && !modalOpen()) {
+      player.update(dt, keys, state);
+      state.time += dt * 4;
+      discoverNearby();
+      if (pendingInteraction) {
+        const terminal = siteFor(pendingInteraction.id)?.terminal;
+        if (terminal && distance(player, terminal) < 75) { const target = pendingInteraction; pendingInteraction = null; player.stop(); interact(target); }
+        else if (!player.target) pendingInteraction = null;
+      }
+      saveTimer += dt;
+      if (saveTimer > 4) { persist(); saveTimer = 0; }
+    }
+    renderer.render(state, player, elapsed * 1000, { mode, target: player.target });
+    hudTimer += dt;
+    if (hudTimer > .15) { updateHUD(); hudTimer = 0; }
+  }
+  requestAnimationFrame(frame);
+}
+
+// Test convenience is deliberately opt-in. Ordinary itch.io builds expose no cheats.
+const debug = new URLSearchParams(location.search).get('debug') === '1' ? {
+  getState: () => structuredClone(state),
+  getPlayer: () => ({ x: player.x, y: player.y, moving: player.moving, target: player.target ? { ...player.target } : null }),
+  getCamera: () => renderer.getCamera(),
+  teleport(id) {
+    const site = siteFor(id);
+    if (!site || !unlocked(site.id)) return false;
+    for (const dialog of dialogs) if (dialog.open) dialog.close();
+    player.stop(); player.x = site.terminal.x; player.y = site.terminal.y + 35;
+    pendingInteraction = null; discoverNearby(); updateHUD(); return true;
+  },
+  setTime(minutes) { if (Number.isFinite(minutes)) { state.time = Math.max(1040, minutes); discoverNearby(); updateHUD(); persist(); } },
+  reset() { clearSave(); saved = null; startGame(true); },
+  finish(which = 'mixed') {
+    this.reset(); this.setTime(1450);
+    for (const level of LEVELS) {
+      state.discovered[level.id] = true;
+      state.inspected[level.id] = { logs: true, config: true };
+      choose(state, level.id, which === 'fix' || which === 'allFix' ? 'fix' : which === 'exploit' || which === 'allExploit' ? 'exploit' : level.id % 2 ? 'fix' : 'exploit');
+    }
+    updateHUD(); persist(); showEnding();
+  },
+} : null;
+if (debug) window.__maintainer = debug;
+refreshTitle(); updateHUD(); requestAnimationFrame(frame);

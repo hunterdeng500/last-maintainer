@@ -1,81 +1,478 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="zh-CN">
-<head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>最后一位维护员 × bug大乱斗</title>
-  <link rel="stylesheet" href="css/style.css" />
-</head>
-<body>
-  <!-- Title screen -->
-  <div id="screen-title" class="screen active">
-    <div class="art" aria-hidden="true">
-╔══════════════════════════════════╗
-║   LAST MAINTAINER  /  BUG FIGHT  ║
-║          最后一位维护员           ║
-╚══════════════════════════════════╝
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <meta name="theme-color" content="#253c35">
+    <meta name="description" content="走进像素小镇，调查六个有来由的 bug。在修复与利用之间，决定最后一位维护员的归宿。">
+    <title>
+      最后一位维护员 · bug 大乱斗
+    </title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%232c5040'/%3E%3Cpath d='M8 22l12-12m-2-4h8v8' fill='none' stroke='%23efd493' stroke-width='5'/%3E%3C/svg%3E">
+    <link rel="stylesheet" href="css/style.css">
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <a class="brand" href="#" id="brand-home" aria-label="查看游戏说明">
+          <span class="brand-mark" aria-hidden="true">
+            ⌁
+          </span>
+          <span>
+            <strong>
+              最后一位维护员
+            </strong>
+            <small>
+              THE LAST MAINTAINER
+            </small>
+          </span>
+        </a>
+        <span class="edition">
+          BUG 大乱斗
+          <i>
+            ／
+          </i>
+          小镇篇
+        </span>
+        <div class="clock-card">
+          <span id="day-icon" aria-hidden="true">
+            ☀
+          </span>
+          <div>
+            <small id="day-label">
+              第 1 天 · 晴
+            </small>
+            <strong id="clock">
+              17:20
+            </strong>
+          </div>
+        </div>
+        <button class="icon-button" id="btn-help" title="操作说明" aria-label="操作说明">
+          ?
+        </button>
+        <button class="icon-button fullscreen-button" id="btn-fullscreen" title="全屏" aria-label="切换全屏">
+          ⛶
+        </button>
+      </header>
+      <main class="game-frame">
+        <canvas id="world" width="960" height="600" tabindex="0" aria-label="可走动的像素小镇。使用 WASD 或方向键移动，E 互动；也可点击地面行走。">
+        </canvas>
+        <div class="vignette" aria-hidden="true">
+        </div>
+        <div class="hud hidden" id="hud">
+          <div class="stats-row">
+            <div class="stat stability-stat">
+              <span class="stat-icon">
+                ✦
+              </span>
+              <div>
+                <small>
+                  城市稳定性
+                </small>
+                <strong>
+                  <span id="stability">
+                    52
+                  </span>
+                  <em>
+                    %
+                  </em>
+                </strong>
+                <div class="meter">
+                  <i id="stability-meter">
+                  </i>
+                </div>
+              </div>
+            </div>
+            <div class="stat">
+              <span class="stat-icon coin">
+                ◆
+              </span>
+              <div>
+                <small>
+                  维护资源
+                </small>
+                <strong id="resources">
+                  80
+                </strong>
+              </div>
+            </div>
+            <div class="stat">
+              <span class="stat-icon">
+                ⚑
+              </span>
+              <div>
+                <small>
+                  异常已处理
+                </small>
+                <strong>
+                  <span id="progress">
+                    0
+                  </span>
+                  <em>
+                    / 6
+                  </em>
+                </strong>
+              </div>
+            </div>
+          </div>
+          <aside class="quest-paper" id="quest-paper">
+            <span class="paper-pin">
+            </span>
+            <div class="eyebrow">
+              今日的维护手记
+            </div>
+            <h2 id="quest-title">
+              去杂货铺看看
+            </h2>
+            <p id="quest-copy">
+              沿石路向北，柜台上的金币好像不太对劲。
+            </p>
+            <div class="quest-step" id="quest-step">
+              ◇ 靠近异常，开始调查
+            </div>
+          </aside>
+          <button class="minimap-card" id="btn-minimap" aria-label="打开小镇地图">
+            <span class="minimap-heading">
+              小镇导览
+              <kbd>
+                M
+              </kbd>
+            </span>
+            <canvas id="minimap" width="172" height="115" aria-hidden="true">
+            </canvas>
+            <span id="region-label">
+              西街 · 日常的裂缝
+            </span>
+          </button>
+          <div class="location-label" id="location-label">
+            西街 · 旧日小镇
+          </div>
+          <div class="interaction-bubble hidden" id="interaction-bubble">
+            <kbd>
+              E
+            </kbd>
+            <span id="interaction-label">
+              调查终端
+            </span>
+          </div>
+          <div class="walk-hint" id="walk-hint">
+            点击地面前往 · 按住 Shift 冲刺
+          </div>
+        </div>
+        <section class="title-layer" id="title-screen" aria-labelledby="title-heading">
+          <div class="title-card">
+            <div class="title-overline">
+              <span>
+              </span>
+              一份无人接班的工作
+              <span>
+              </span>
+            </div>
+            <div class="title-emblem" aria-hidden="true">
+              ✦
+            </div>
+            <h1 id="title-heading">
+              最后一位
+              <br>
+              <span>
+                维护员
+              </span>
+            </h1>
+            <div class="title-edition">
+              BUG 大乱斗
+              <b>
+                ·
+              </b>
+              小镇篇
+            </div>
+            <p>
+              人类已经离开，小镇还在运转。
+              <br>
+              背上工具包，去看看今天哪里出了错。
+            </p>
+            <button class="button primary title-start" id="btn-start">
+              走进小镇
+              <span>
+                →
+              </span>
+            </button>
+            <button class="button primary title-start hidden" id="btn-continue">
+              继续值班
+              <span>
+                →
+              </span>
+            </button>
+            <button class="text-button hidden" id="btn-new">
+              重新开始一天
+            </button>
+            <div class="title-footnote">
+              自由漫步 · 六处异常 · 三种结局
+            </div>
+          </div>
+          <div class="title-caption">
+            <span class="live-dot">
+            </span>
+            城市系统仍在运行
+            <span class="caption-line">
+            </span>
+            等待维护员接班
+          </div>
+        </section>
+        <div class="toast-stack" id="toasts" role="status" aria-live="polite">
+        </div>
+        <div class="transition-flash" id="transition-flash">
+        </div>
+      </main>
+      <footer class="bottom-bar">
+        <div class="movement-keys">
+          <span>
+            <kbd>
+              W
+            </kbd>
+            <kbd>
+              A
+            </kbd>
+            <kbd>
+              S
+            </kbd>
+            <kbd>
+              D
+            </kbd>
+          </span>
+          移动
+          <i>
+            ·
+          </i>
+          <kbd>
+            Shift
+          </kbd>
+          冲刺
+        </div>
+        <nav class="toolbelt" aria-label="维护工具">
+          <button id="btn-interact" disabled>
+            <span>
+              ⌘
+            </span>
+            互动
+            <kbd>
+              E
+            </kbd>
+          </button>
+          <button id="btn-map" disabled>
+            <span>
+              ▧
+            </span>
+            地图
+            <kbd>
+              M
+            </kbd>
+          </button>
+          <button id="btn-journal" disabled>
+            <span>
+              ▤
+            </span>
+            手记
+            <kbd>
+              J
+            </kbd>
+          </button>
+          <button id="btn-rest" disabled>
+            <span>
+              ☾
+            </span>
+            歇一会
+          </button>
+        </nav>
+        <span class="save-indicator" id="save-indicator">
+          <i>
+          </i>
+          本地存档
+        </span>
+      </footer>
     </div>
-    <h1>最后一位维护员 × bug大乱斗</h1>
-    <p class="sub">人类离开之后，城市靠旧系统运转。<br>你是最后一个维护员。Bug 会以真实的技术原因出现。<br><br>每关：发现异常 → 查日志/配置 → 定位原因 → 选择<strong>修复</strong>或<strong>利用</strong>。</p>
-    <div id="actions">
-      <button class="primary" id="btn-start" type="button">开始维护 · Enter</button>
-    </div>
-    <p style="color:var(--muted);font-size:0.8rem;margin-top:1.5rem;">约 15 分钟 · 6 关 · 中文 · 无需素材包</p>
-  </div>
-
-  <!-- Game screen -->
-  <div id="screen-game" class="screen">
-    <header id="topbar">
-      <span class="title">最后一位维护员</span>
-      <span class="meta" id="level-label">关卡 1 / 6</span>
-      <div class="scores">
-        <span id="score-fix">修复 0</span>
-        <span id="score-exploit">利用 0</span>
+    <dialog id="investigation-dialog" class="paper-dialog investigation" aria-labelledby="scene-title">
+      <div class="dialog-heading">
+        <div>
+          <div class="eyebrow" id="scene-place">
+            现场调查
+          </div>
+          <h2 id="scene-title">
+            异常
+          </h2>
+        </div>
+        <button class="close-button" id="btn-close-dialog" aria-label="关闭调查">
+          ×
+        </button>
       </div>
-    </header>
-
-    <div id="main">
-      <section class="panel" id="panel-map">
-        <div class="panel-header">小镇地图 · 点击关卡或用数字键</div>
-        <div class="panel-body">
-          <div id="town-map"></div>
-          <p style="margin-top:1rem;color:var(--muted);font-size:0.8rem;">
-            当前稳定性：<span id="city-stability">████████░░</span>
-            <span id="city-stability-num" style="font-family:var(--mono)">80%</span>
-          </p>
+      <div class="investigation-steps" id="investigation-steps">
+      </div>
+      <div class="tabbar" role="tablist" aria-label="调查资料">
+        <button id="tab-scene" role="tab" aria-selected="true">
+          01 现场
+        </button>
+        <button id="tab-logs" role="tab" aria-selected="false">
+          02 日志
+          <span>
+          </span>
+        </button>
+        <button id="tab-config" role="tab" aria-selected="false">
+          03 配置
+          <span>
+          </span>
+        </button>
+      </div>
+      <div class="investigation-content" id="investigation-content" role="tabpanel">
+      </div>
+      <div class="cause-box hidden" id="cause-box">
+      </div>
+      <div id="choice-area">
+        <p class="choice-hint" id="choice-hint">
+          读完日志与配置，就能决定如何处理。
+        </p>
+        <div class="choice-buttons">
+          <button id="btn-fix" class="choice-button fix" disabled>
+            <strong>
+              修复异常
+              <kbd>
+                F
+              </kbd>
+            </strong>
+            <small>
+              稳定性 +8 · 资源 +8
+            </small>
+          </button>
+          <button id="btn-exploit" class="choice-button exploit" disabled>
+            <strong>
+              利用漏洞
+              <kbd>
+                X
+              </kbd>
+            </strong>
+            <small>
+              稳定性 −5 · 获得额外资源
+            </small>
+          </button>
         </div>
-      </section>
-
-      <section class="panel" id="panel-scene">
-        <div class="panel-header" id="panel-scene-header">现场 · 日志</div>
-        <div class="panel-body">
-          <h2 id="scene-title">—</h2>
-          <p id="scene-desc"></p>
-          <div class="anomaly-box" id="anomaly-box"></div>
-          <div id="terminal"></div>
-          <div id="code-area"></div>
-          <div id="result-banner"></div>
-          <div id="actions" class="level-actions"></div>
+      </div>
+      <div class="hidden result-box" id="result-box">
+      </div>
+    </dialog>
+    <dialog id="map-dialog" class="paper-dialog map-dialog" aria-labelledby="map-title">
+      <div class="dialog-heading">
+        <div>
+          <div class="eyebrow">
+            一座还在运转的小镇
+          </div>
+          <h2 id="map-title">
+            小镇导览
+          </h2>
         </div>
-      </section>
+        <button class="close-button" data-close="map-dialog" aria-label="关闭地图">
+          ×
+        </button>
+      </div>
+      <canvas id="large-map" width="864" height="576" aria-label="小镇地图，点击已开放区域可自动步行">
+      </canvas>
+      <div class="map-legend">
+        <span>
+          <i class="legend-you">
+          </i>
+          你在这里
+        </span>
+        <span>
+          <i class="legend-bug">
+          </i>
+          待调查
+        </span>
+        <span>
+          <i class="legend-fix">
+          </i>
+          已修复
+        </span>
+        <span>
+          <i class="legend-exploit">
+          </i>
+          已利用
+        </span>
+      </div>
+      <p class="muted">
+        点击地图步行前往 · 处理 2 / 4 处异常后，开放中央街区 / 东岸
+      </p>
+    </dialog>
+    <dialog id="journal-dialog" class="paper-dialog journal-dialog" aria-labelledby="journal-title">
+      <div class="dialog-heading">
+        <div>
+          <div class="eyebrow">
+            每个 bug 都事出有因
+          </div>
+          <h2 id="journal-title">
+            维护手记
+          </h2>
+        </div>
+        <button class="close-button" data-close="journal-dialog" aria-label="关闭手记">
+          ×
+        </button>
+      </div>
+      <div id="journal-list">
+      </div>
+      <div class="journal-footer" id="journal-footer">
+      </div>
+    </dialog>
+    <dialog id="small-dialog" class="paper-dialog small-dialog" aria-labelledby="small-title">
+      <div class="dialog-heading">
+        <div>
+          <div class="eyebrow" id="small-eyebrow">
+            小镇日常
+          </div>
+          <h2 id="small-title">
+            你好，维护员。
+          </h2>
+        </div>
+        <button class="close-button" data-close="small-dialog" aria-label="关闭">
+          ×
+        </button>
+      </div>
+      <div id="small-content">
+      </div>
+      <div class="small-actions" id="small-actions">
+      </div>
+    </dialog>
+    <dialog id="ending-dialog" class="paper-dialog ending-dialog" aria-labelledby="ending-title">
+      <div class="ending-art" id="ending-art" aria-hidden="true">
+      </div>
+      <div class="eyebrow">
+        最后一页维护记录
+      </div>
+      <h2 id="ending-title">
+      </h2>
+      <p id="ending-body">
+      </p>
+      <div class="ending-stats" id="ending-stats">
+      </div>
+      <div class="ending-actions">
+        <button class="button primary" id="btn-ending-walk">
+          再看看这座小镇
+        </button>
+        <button class="button secondary" id="btn-title">
+          回到标题
+        </button>
+      </div>
+    </dialog>
+    <div class="mobile-controls hidden" id="mobile-controls" aria-label="触屏控制">
+      <button data-move="ArrowUp" aria-label="向上">
+        ▲
+      </button>
+      <button data-move="ArrowLeft" aria-label="向左">
+        ◀
+      </button>
+      <button data-move="ArrowDown" aria-label="向下">
+        ▼
+      </button>
+      <button data-move="ArrowRight" aria-label="向右">
+        ▶
+      </button>
     </div>
-
-    <footer id="footer">
-      <kbd>1</kbd>–<kbd>6</kbd> 选关 · <kbd>L</kbd> 查日志 · <kbd>C</kbd> 看配置 · <kbd>F</kbd> 修复 · <kbd>E</kbd> 利用 · <kbd>N</kbd> 下一关
-    </footer>
-  </div>
-
-  <!-- Ending screen -->
-  <div id="screen-ending" class="screen">
-    <div id="ending-art">🏙️</div>
-    <h2 id="ending-title">结局</h2>
-    <p id="ending-body"></p>
-    <div id="ending-stats"></div>
-    <div id="actions">
-      <button class="primary" id="btn-restart" type="button">再来一次</button>
-    </div>
-  </div>
-
-  <script type="module" src="js/game.js"></script>
-</body>
+    <script type="module" src="js/game.js">
+    </script>
+  </body>
 </html>
