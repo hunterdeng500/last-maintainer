@@ -82,6 +82,10 @@ async function decide(id, choice) {
   assert.equal((await state()).discovered[id], true);
   assert.deepEqual((await state()).inspected[id], { logs: true, config: true });
   await page.locator('#btn-result-continue').click();
+  if ([2, 4, 6].includes(id)) {
+    await page.locator('#story-dialog').waitFor({ state: 'visible' });
+    await page.locator('#btn-story-skip').click();
+  }
 }
 
 try {
@@ -96,6 +100,7 @@ try {
   debugURL.searchParams.set('debug', '1');
   await page.goto(debugURL.href);
   await page.locator('#btn-start').click();
+  await page.locator('#btn-story-skip').click();
   await page.waitForFunction(() => Boolean(window.__maintainer));
   const sites = await page.evaluate(async () => (await import('./js/world.js')).SITES);
   assert.equal(sites.length, 6);
@@ -212,6 +217,7 @@ try {
   for (const choice of ['fix', 'exploit']) {
     await check(`all-${choice} ending through all six UI decisions`, async () => {
       await page.evaluate(() => { window.__maintainer.reset(); window.__maintainer.setTime(1450); });
+      await page.locator('#btn-story-skip').click();
       for (const site of sites) {
         await page.evaluate(id => window.__maintainer.teleport(id), site.id);
         await page.keyboard.press('e');

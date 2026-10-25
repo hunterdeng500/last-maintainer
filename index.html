@@ -4,9 +4,9 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
     <meta name="theme-color" content="#f5ead4">
-    <meta name="description" content="走进暖色像素小镇，调查六个有来由的 bug。在修复与利用之间，决定最后一位维护员的归宿。">
+    <meta name="description" content="《机器休止》主题中文互动演绎。人类已离开，机器仍在说话。走过六处真实技术故障，在修复与利用之间决定最后一位维护员的归宿。">
     <title>
-      最后一位维护员 · bug 大乱斗
+      最后一位维护员 · 机器休止
     </title>
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%232c5040'/%3E%3Cpath d='M8 22l12-12m-2-4h8v8' fill='none' stroke='%23efd493' stroke-width='5'/%3E%3C/svg%3E">
     <link rel="stylesheet" href="css/style.css">
@@ -28,11 +28,11 @@
           </span>
         </a>
         <span class="edition">
-          BUG 大乱斗
+          机器休止
           <i>
             ／
           </i>
-          小镇篇
+          主题演绎
         </span>
         <div class="clock-card">
           <span id="day-icon" aria-hidden="true">
@@ -179,16 +179,16 @@
               </span>
             </h1>
             <div class="title-edition">
-              BUG 大乱斗
+              机器休止
               <b>
                 ·
               </b>
-              小镇篇
+              主题演绎
             </div>
             <p>
-              人类已经离开，小镇还在运转。
+              人类已经离开，机器仍在说话。
               <br>
-              背上工具包，去看看今天哪里出了错。
+              你是最后一个，还要亲自走到现场的人。
             </p>
             <button class="button primary title-start" id="btn-start">
               走进小镇
@@ -206,7 +206,7 @@
               重新开始一天
             </button>
             <div class="title-footnote">
-              自由漫步 · 六处异常 · 三种结局
+              六处故障 · 四段通讯 · 可跳过与回读
             </div>
           </div>
           <div class="title-caption">
@@ -321,7 +321,7 @@
           </span>
         </button>
       </div>
-      <div class="investigation-content" id="investigation-content" role="tabpanel">
+      <div class="investigation-content" id="investigation-content" role="tabpanel" tabindex="0" aria-label="现场资料，可滚动阅读">
       </div>
       <div class="cause-box hidden" id="cause-box">
       </div>
@@ -413,9 +413,34 @@
           ×
         </button>
       </div>
-      <div id="journal-list">
+      <div class="tabbar" role="tablist" aria-label="手记内容">
+        <button id="journal-tab-maintenance" role="tab" aria-controls="journal-maintenance" aria-selected="true">维护记录</button>
+        <button id="journal-tab-comms" role="tab" aria-controls="journal-comms" aria-selected="false">通讯 <span id="comms-unread"></span></button>
       </div>
+      <section id="journal-maintenance" role="tabpanel" aria-labelledby="journal-tab-maintenance">
+        <p class="journal-intro">把亲眼所见留下来。终端的记录也可能错。</p>
+        <div id="journal-list"></div>
+      </section>
+      <section id="journal-comms" class="hidden" role="tabpanel" aria-labelledby="journal-tab-comms">
+        <p class="journal-intro">离城前的声音与现场证据。通讯按维护进度送达；深读档案在核对该处日志与配置后收录。展开即记为已读，可随时关掉。</p>
+        <div id="comms-list"></div>
+      </section>
       <div class="journal-footer" id="journal-footer">
+      </div>
+    </dialog>
+    <dialog id="story-dialog" class="paper-dialog story-dialog" aria-labelledby="story-title">
+      <div class="dialog-heading">
+        <div>
+          <div class="eyebrow" id="story-eyebrow"></div>
+          <h2 id="story-title"></h2>
+        </div>
+        <button class="close-button" data-close="story-dialog" aria-label="暂存通讯，回到小镇">×</button>
+      </div>
+      <div class="story-body" id="story-body" tabindex="0" role="region" aria-labelledby="story-title"></div>
+      <p class="story-note">已收进 J 手记 → 通讯。阅读时小镇时间暂停。</p>
+      <div class="story-actions">
+        <button class="button secondary" id="btn-story-skip">稍后再读 · Esc</button>
+        <button class="button primary" id="btn-story-continue">收好通讯，继续巡查</button>
       </div>
     </dialog>
     <dialog id="small-dialog" class="paper-dialog small-dialog" aria-labelledby="small-title">
@@ -445,6 +470,7 @@
       </div>
       <h2 id="ending-title">
       </h2>
+      <p id="ending-subtitle"></p>
       <p id="ending-body">
       </p>
       <div class="ending-stats" id="ending-stats">

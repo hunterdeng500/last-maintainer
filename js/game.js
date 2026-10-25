@@ -1,6 +1,7 @@
 /** DOM orchestration only: simulation, data, movement, and art live in their own modules. */
 import { LEVELS, ENDINGS, getLevel } from './levels.js';
-import { createState, loadState, saveState, clearSave, getStats, getEnding, choose } from './state.js';
+import { createState, loadState, saveState, clearSave, getStats, getEnding, choose,
+  getPendingStory, getAvailableStory, markStorySeen, getAvailableComms, markCommRead, recordNpcVisit } from './state.js';
 import { WORLD, SITES, NPCS, WorldRenderer, getNearby, getRegion, isBlocked, getNPCPosition } from './world.js';
 import { Player } from './player.js';
 
@@ -17,6 +18,8 @@ let player = new Player(state.player);
 let mode = 'title';
 let activeLevel = null;
 let activeTab = 'scene';
+let journalTab = 'maintenance';
+let activeStory = null;
 let pendingInteraction = null;
 let elapsed = 0;
 let previousTime = performance.now();
@@ -74,8 +77,27 @@ function startGame(fresh = false) {
   persist();
   updateHUD();
   canvas.focus({ preventScroll: true });
-  if (getEnding(state) && !state.endingSeen) showEnding();
-  else toast(fresh || !saved ? '你已接班。向北走，到杂货铺看看异常账本。' : '欢迎回来，维护员。上次的脚步与选择都还在。');
+  advanceStory();
+  if (!modalOpen()) toast(fresh || !saved ? '你已接班。向北走，到杂货铺看看异常账本。' : '欢迎回来，维护员。上次的脚步与选择都还在。');
+}
+
+// Milestones wait until the current result/reader closes. No timer, scroll gate or seventh task.
+function advanceStory() {
+  if (mode !== 'playing' || modalOpen()) return;
+  const story = getPendingStory(state);
+  if (story) {
+    activeStory = story.id;
+    $('#story-title').textContent = story.title;
+    $('#story-eyebrow').textContent = story.eyebrow;
+    $('#story-body').textContent = story.body;
+    $('#btn-story-skip').textContent = story.id === 'intro' ? '跳过开场 · Esc' : '稍后再读 · Esc';
+    $('#btn-story-continue').textContent = story.id === 'intro' ? '接过工具包' : story.id === 'reckoning' ? '翻到最后一页' : '收好通讯，继续巡查';
+    // Received and read are separate: skipping never loses the entry or claims it was read.
+    markStorySeen(state, story.id);
+    persist();
+    showDialog('#story-dialog');
+    $('#story-body').scrollTop = 0;
+  } else if (getEnding(state) && !state.endingSeen) showEnding();
 }
 
 function returnToTitle() {
@@ -120,7 +142,7 @@ function waitUntilMidnight() {
   discoverNearby();
   persist();
   updateHUD();
-  toast(`第 ${Math.floor(state.time / 1440) + 1} 天 · 00:10。昨晚的折扣灯仍亮着。`);
+  toast(`第 ${Math.floor(state.time / 1440) + 1} 天 · 00:10。${state.choices[2] === 'fix' ? '夜市已按完整日期结束活动。' : '原定那一夜的折扣灯仍亮着。'}`);
 }
 
 function rest() {
@@ -158,8 +180,12 @@ function interact(target = getNearby(player, state)) {
   else if (target.type === 'npc') {
     const npc = NPCS.find((n) => n.id === target.id);
     if (!npc) return;
-    const lines = npc.lines || ['小镇还在运转。辛苦了，维护员。'];
-    smallDialog(npc.name, lines[Math.floor(elapsed / 11) % lines.length], [['继续巡查', null, true]], '路边的服务机器人');
+    const phase = npc.phases?.filter((entry) => entry.at <= getStats(state).total).at(-1);
+    const lines = phase?.lines || npc.lines || ['小镇还在运转。辛苦了，维护员。'];
+    const visit = state.npcVisits[npc.id] || 0;
+    recordNpcVisit(state, npc.id);
+    persist();
+    smallDialog(npc.name, lines[visit % lines.length], [['继续巡查', null, true]], '服务机转播 · 旧声音与新见闻');
   } else if (target.type === 'gate') {
     const needed = Number(target.id) === 1 ? 2 : 4;
     smallDialog('桥闸还未开放', `旧电网需要逐区接通。累计处理 ${needed} 处异常后，这座桥就会开放。\n修复与利用都能推进路线。当前已处理 ${getStats(state).total} / 6。`, [['记下了', null, true]], '街区通行提示');
@@ -192,10 +218,11 @@ function renderInvestigation() {
     if (activeLevel === 2) rows += `\n<span class="log-err">[实时终端] 第 ${Math.floor(state.time / 1440) + 1} 天 ${formatTime(state.time)} / ${choice === 'fix' ? 'active=false' : 'active=true'} / 原定截止：第 1 天 23:59</span>`;
     content = `<pre class="terminal">${rows}</pre>`;
   } else content = `<pre class="terminal">${escapeHTML(level.config)}</pre>`;
-  $('#investigation-content').innerHTML = content;
+  $('#investigation-content').innerHTML = (choice ? '<p class="journal-intro">已封存 · 以下为处理前的现场与诊断。处理后的变化记录在下方。</p>' : '') + content;
   $('#btn-wait-market')?.addEventListener('click', () => { waitUntilMidnight(); state.discovered[2] = true; renderInvestigation(); persist(); });
   $('#cause-box').classList.toggle('hidden', !ready);
-  $('#cause-box').innerHTML = `<strong>已定位 · ${escapeHTML(level.bug)}</strong>${escapeHTML(level.cause)}<p class="decision-description"><b>修复：</b>${escapeHTML(level.fixText)}<br><b>利用：</b>${escapeHTML(level.exploitText)}</p>`;
+  $('#cause-box').innerHTML = `<strong>已定位 · ${escapeHTML(level.bug)}</strong>${escapeHTML(level.cause)}<p class="decision-description"><b>修复：</b>${escapeHTML(level.fixText)}<br><b>利用：</b>${escapeHTML(level.exploitText)}</p>${ready && level.archive?.length ? '<button class="text-button" id="btn-site-archive">离城前的声音已收录 · 打开通讯深读 →</button>' : ''}`;
+  $('#btn-site-archive')?.addEventListener('click', () => { closeDialog('#investigation-dialog'); openJournal('comms', `archive:${activeLevel}:0`); });
   $('#choice-area').classList.toggle('hidden', !!choice);
   $('#btn-fix').disabled = !ready || !!choice;
   $('#btn-exploit').disabled = !ready || !!choice;
@@ -204,7 +231,7 @@ function renderInvestigation() {
   $('#result-box').classList.toggle('hidden', !choice);
   $('#result-box').classList.toggle('exploited', choice === 'exploit');
   if (choice) {
-    $('#result-box').innerHTML = `<strong>${choice === 'fix' ? '✓ 已修复' : '◆ 已利用'}</strong><br>${escapeHTML(choice === 'fix' ? level.fixResult : level.exploitResult)}<br><button class="button primary" id="btn-result-continue">${getStats(state).total === 6 && !state.endingSeen ? '翻到手记最后一页' : '回到小镇，看看变化'} →</button>`;
+    $('#result-box').innerHTML = `<strong>${choice === 'fix' ? '✓ 已修复' : '◆ 已利用'}</strong><p class="result-text">${escapeHTML(choice === 'fix' ? level.fixResult : level.exploitResult)}</p><button class="button primary" id="btn-result-continue">${getStats(state).total === 6 && !state.endingSeen ? '听取最后一段通讯' : '回到小镇，看看变化'} →</button>`;
     $('#btn-result-continue').addEventListener('click', () => closeDialog('#investigation-dialog'));
   }
 }
@@ -219,6 +246,7 @@ function inspect(tab) {
     persist();
   }
   renderInvestigation();
+  $('#investigation-content').scrollTop = 0;
 }
 
 function decide(choice) {
@@ -229,6 +257,7 @@ function decide(choice) {
   persist();
   renderInvestigation();
   updateHUD();
+  $('#result-box').scrollIntoView({ block: 'nearest' });
   if (before === 1 || before === 3) toast(before === 1 ? '中央街区的桥闸已开放。沿主路向东继续巡查。' : '东岸已接入电网。最后两处异常正在等待你。');
 }
 
@@ -238,6 +267,7 @@ function showEnding() {
   const ending = ENDINGS[endingKey];
   const stats = getStats(state);
   $('#ending-title').textContent = ending.title;
+  $('#ending-subtitle').textContent = ending.subtitle;
   $('#ending-body').textContent = ending.body;
   $('#btn-ending-walk').textContent = endingKey === 'allExploit' ? '回看离开前的小镇' : '再看看这座小镇';
   $('#ending-art').className = `ending-art ${endingKey === 'allExploit' ? 'collapse' : endingKey === 'mixed' ? 'mixed' : ''}`;
@@ -257,6 +287,9 @@ function updateHUD() {
   $('#stability-meter').style.width = `${state.stability}%`;
   $('#resources').textContent = state.resources;
   $('#progress').textContent = stats.total;
+  const unread = getAvailableComms(state).filter((entry) => !state.readComms[entry.id]).length;
+  $('#btn-journal').title = `维护手记 · 通讯未读 ${unread}`;
+  $('#btn-journal').classList.toggle('has-unread', unread > 0);
   const region = Math.max(0, Math.min(2, getRegion(player.x)));
   $('#region-label').textContent = regionNames[region];
   $('#location-label').textContent = regionNames[region];
@@ -345,16 +378,38 @@ function routeTo(x, y, automatic = true) {
   return false;
 }
 
-function openJournal() {
+function openJournal(tab = 'maintenance', entryId = null) {
   if (mode !== 'playing') return;
   if ($('#journal-dialog').open) { closeDialog('#journal-dialog'); return; }
   if (modalOpen()) return;
+  journalTab = typeof tab === 'string' ? tab : 'maintenance';
+  renderJournal();
+  showDialog('#journal-dialog');
+  if (entryId) {
+    const entry = [...document.querySelectorAll('[data-comm]')].find((item) => item.dataset.comm === entryId);
+    if (entry) { entry.open = true; entry.scrollIntoView({ block: 'start' }); }
+  }
+}
+
+function renderJournal() {
   $('#journal-list').innerHTML = LEVELS.map((level) => {
     const choice = state.choices[level.id];
     const record = state.inspected[level.id] || {};
     const status = choice ? choice === 'fix' ? '✓ 已修复 · 稳定性 +8' : `◆ 已利用 · 资源 +${level.reward}` : !unlocked(level.id) ? '桥闸未开放' : state.discovered[level.id] ? `已发现 · 日志 ${record.logs ? '✓' : '○'} / 配置 ${record.config ? '✓' : '○'}` : '待前往现场';
-    return `<article class="journal-entry"><span class="journal-number">0${level.id}</span><div><h3>${escapeHTML(level.name)}</h3><p>${escapeHTML(level.place)}${record.logs && record.config ? ` · ${escapeHTML(level.bug)}` : ''}</p><span class="journal-status">${status}</span></div><button data-route="${level.id}" ${!unlocked(level.id) ? 'disabled' : ''}>前往 →</button></article>`;
+    const evidence = record.logs && record.config && level.evidence ? `<p class="journal-evidence"><b>亲历：</b>${escapeHTML(level.evidence)}</p>` : '';
+    const outcome = choice ? `<details class="journal-outcome"><summary>重读处理后的现场</summary><p>${escapeHTML(choice === 'fix' ? level.fixResult : level.exploitResult)}</p></details>` : '';
+    return `<article class="journal-entry"><span class="journal-number">0${level.id}</span><div><h3>${escapeHTML(level.name)}</h3><p>${escapeHTML(level.place)}${record.logs && record.config ? ` · ${escapeHTML(level.bug)}` : ''}</p><span class="journal-status">${status}</span>${evidence}${outcome}</div><button data-route="${level.id}" ${!unlocked(level.id) ? 'disabled' : ''}>前往 →</button></article>`;
   }).join('');
+  const comms = getAvailableComms(state);
+  $('#comms-list').innerHTML = comms.map((entry) => `<details class="comm-entry" data-comm="${escapeHTML(entry.id)}"><summary><span class="comm-kind">${escapeHTML(entry.kind)}</span><strong>${escapeHTML(entry.title)}</strong><span class="comm-status">${state.readComms[entry.id] ? '已读' : '未读'}</span></summary><div class="comm-body">${escapeHTML(entry.body)}</div></details>`).join('');
+  for (const entry of document.querySelectorAll('[data-comm]')) entry.addEventListener('toggle', () => {
+    if (entry.open && markCommRead(state, entry.dataset.comm)) {
+      entry.querySelector('.comm-status').textContent = '已读';
+      persist();
+      updateCommsBadge();
+    }
+  });
+  selectJournalTab(journalTab);
   const stats = getStats(state);
   $('#journal-footer').innerHTML = `修复 ${stats.fix} · 利用 ${stats.exploit} · 资源 ${state.resources}${getEnding(state) ? '<br><button class="text-button" id="btn-review-ending">重读最后一页</button>' : '<br>每个选择都能继续前进，也都会留下一些改变。'}`;
   for (const button of document.querySelectorAll('[data-route]')) button.addEventListener('click', () => {
@@ -362,12 +417,29 @@ function openJournal() {
     closeDialog('#journal-dialog');
     routeTo(terminal.x, terminal.y);
   });
-  $('#btn-review-ending')?.addEventListener('click', () => { closeDialog('#journal-dialog'); showEnding(); });
-  showDialog('#journal-dialog');
+  $('#btn-review-ending')?.addEventListener('click', () => {
+    closeDialog('#journal-dialog');
+    if (getPendingStory(state)) advanceStory(); else showEnding();
+  });
+}
+
+function updateCommsBadge() {
+  const unread = getAvailableComms(state).filter((entry) => !state.readComms[entry.id]).length;
+  $('#comms-unread').textContent = unread ? `${unread} 未读` : '已收好';
+}
+
+function selectJournalTab(tab) {
+  journalTab = tab === 'comms' ? 'comms' : 'maintenance';
+  for (const name of ['maintenance', 'comms']) {
+    $(`#journal-tab-${name}`).setAttribute('aria-selected', String(journalTab === name));
+    $(`#journal-tab-${name}`).tabIndex = journalTab === name ? 0 : -1;
+    $(`#journal-${name}`).classList.toggle('hidden', journalTab !== name);
+  }
+  updateCommsBadge();
 }
 
 function showHelp() {
-  smallDialog('维护员口袋手册', 'WASD / 方向键：移动　Shift：冲刺\n点击地面：自动绕路步行；点击终端：走近调查\nE / 空格：互动　M：地图　J：手记\n调查中 L：日志　C：配置　F：修复　X：利用\nEsc：关闭面板\n\n先走近看见异常，再读日志与配置，最后作出选择。每处理两处异常，东边的桥闸就会开放。\n\n时间每秒推进 4 分钟，读面板时暂停。西街长椅和夜市可等到午夜。进度自动保存在当前浏览器。', [['知道了', null, true]], '背好工具，沿着石路出发');
+  smallDialog('维护员口袋手册', 'WASD / 方向键：移动　Shift：冲刺\n点击地面：自动绕路步行；点击终端：走近调查\nE / 空格：互动　M：地图　J：手记 / 通讯\n调查中 L：日志　C：配置　F：修复　X：利用\nEsc：关闭面板 / 暂存通讯\n\n先走近看见异常，再查看日志与配置，最后作出选择。每处理两处异常，东边的桥闸就会开放。\n\n通讯与长档案可在 J 手记重读，无需读完才能选择。服务机会随维护进度说起不同的事；其中的人声是离城前的记录。\n\n时间每秒推进 4 分钟，读面板时暂停。西街长椅和夜市可等到午夜。进度自动保存在当前浏览器。', [['知道了', null, true]], '背好工具，沿着石路出发');
 }
 
 $('#btn-start').addEventListener('click', () => startGame(true));
@@ -380,6 +452,22 @@ $('#btn-interact').addEventListener('click', () => interact());
 $('#btn-rest').addEventListener('click', rest);
 for (const id of ['#btn-map', '#btn-minimap']) $(id).addEventListener('click', openMap);
 $('#btn-journal').addEventListener('click', openJournal);
+for (const tab of ['maintenance', 'comms']) {
+  $(`#journal-tab-${tab}`).addEventListener('click', () => selectJournalTab(tab));
+  $(`#journal-tab-${tab}`).addEventListener('keydown', (event) => {
+    if (event.code === 'ArrowLeft' || event.code === 'ArrowRight') {
+      event.preventDefault();
+      const next = tab === 'maintenance' ? 'comms' : 'maintenance';
+      selectJournalTab(next); $(`#journal-tab-${next}`).focus();
+    }
+  });
+}
+$('#btn-story-skip').addEventListener('click', () => closeDialog('#story-dialog'));
+$('#btn-story-continue').addEventListener('click', () => {
+  if (activeStory) markCommRead(state, `story:${activeStory}`);
+  persist();
+  closeDialog('#story-dialog');
+});
 $('#btn-close-dialog').addEventListener('click', () => closeDialog('#investigation-dialog'));
 for (const button of document.querySelectorAll('[data-close]')) button.addEventListener('click', () => closeDialog(`#${button.dataset.close}`));
 for (const tab of ['scene', 'logs', 'config']) $(`#tab-${tab}`).addEventListener('click', () => inspect(tab));
@@ -392,8 +480,8 @@ for (const dialog of dialogs) dialog.addEventListener('close', () => {
   if (mode === 'playing') {
     canvas.focus({ preventScroll: true });
     updateHUD();
-    // Also catches Escape on the final result; the ending cannot accidentally be skipped.
-    if (getEnding(state) && !state.endingSeen) queueMicrotask(() => { if (!modalOpen() && mode === 'playing') showEnding(); });
+    // Escape also delivers pending milestones, then the ending, in narrative order.
+    queueMicrotask(advanceStory);
   }
 });
 
@@ -416,7 +504,7 @@ $('#large-map').addEventListener('click', (event) => {
 
 const movementCodes = new Set(['KeyW','KeyA','KeyS','KeyD','ArrowUp','ArrowDown','ArrowLeft','ArrowRight','ShiftLeft','ShiftRight']);
 document.addEventListener('keydown', (event) => {
-  if (['Space','ArrowUp','ArrowDown','ArrowLeft','ArrowRight'].includes(event.code)) event.preventDefault();
+  if (!modalOpen() && ['Space','ArrowUp','ArrowDown','ArrowLeft','ArrowRight'].includes(event.code)) event.preventDefault();
   if (event.repeat && !movementCodes.has(event.code)) return;
   if (event.code === 'Escape') { if (!modalOpen()) { player.stop(); pendingInteraction = null; } return; }
   if (modalOpen()) {
@@ -499,6 +587,8 @@ const debug = new URLSearchParams(location.search).get('debug') === '1' ? {
       state.inspected[level.id] = { logs: true, config: true };
       choose(state, level.id, which === 'fix' || which === 'allFix' ? 'fix' : which === 'exploit' || which === 'allExploit' ? 'exploit' : level.id % 2 ? 'fix' : 'exploit');
     }
+    for (const story of getAvailableStory(state)) markStorySeen(state, story.id);
+    for (const dialog of dialogs) if (dialog.open) dialog.close();
     updateHUD(); persist(); showEnding();
   },
 } : null;

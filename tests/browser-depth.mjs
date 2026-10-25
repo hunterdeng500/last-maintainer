@@ -15,6 +15,7 @@ page.on('console', message => { if (message.type() === 'error') errors.push(mess
 try {
   await page.goto(process.env.GAME_URL || 'http://127.0.0.1:8765/');
   await page.locator('#btn-start').click();
+  await page.locator('#btn-story-skip').click();
   const results = await page.evaluate(async () => {
     const { WorldRenderer, SITES } = await import('./js/world.js');
     const { Player } = await import('./js/player.js');
