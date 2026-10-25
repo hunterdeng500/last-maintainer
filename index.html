@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>最后一位维护员 × bug大乱斗</title>
+  <link rel="stylesheet" href="css/style.css" />
+</head>
+<body>
+  <!-- Title screen -->
+  <div id="screen-title" class="screen active">
+    <div class="art" aria-hidden="true">
+╔══════════════════════════════════╗
+║   LAST MAINTAINER  /  BUG FIGHT  ║
+║          最后一位维护员           ║
+╚══════════════════════════════════╝
+    </div>
+    <h1>最后一位维护员 × bug大乱斗</h1>
+    <p class="sub">人类离开之后，城市靠旧系统运转。<br>你是最后一个维护员。Bug 会以真实的技术原因出现。<br><br>每关：发现异常 → 查日志/配置 → 定位原因 → 选择<strong>修复</strong>或<strong>利用</strong>。</p>
+    <div id="actions">
+      <button class="primary" id="btn-start" type="button">开始维护 · Enter</button>
+    </div>
+    <p style="color:var(--muted);font-size:0.8rem;margin-top:1.5rem;">约 15 分钟 · 6 关 · 中文 · 无需素材包</p>
+  </div>
+
+  <!-- Game screen -->
+  <div id="screen-game" class="screen">
+    <header id="topbar">
+      <span class="title">最后一位维护员</span>
+      <span class="meta" id="level-label">关卡 1 / 6</span>
+      <div class="scores">
+        <span id="score-fix">修复 0</span>
+        <span id="score-exploit">利用 0</span>
+      </div>
+    </header>
+
+    <div id="main">
+      <section class="panel" id="panel-map">
+        <div class="panel-header">小镇地图 · 点击关卡或用数字键</div>
+        <div class="panel-body">
+          <div id="town-map"></div>
+          <p style="margin-top:1rem;color:var(--muted);font-size:0.8rem;">
+            当前稳定性：<span id="city-stability">████████░░</span>
+            <span id="city-stability-num" style="font-family:var(--mono)">80%</span>
+          </p>
+        </div>
+      </section>
+
+      <section class="panel" id="panel-scene">
+        <div class="panel-header" id="panel-scene-header">现场 · 日志</div>
+        <div class="panel-body">
+          <h2 id="scene-title">—</h2>
+          <p id="scene-desc"></p>
+          <div class="anomaly-box" id="anomaly-box"></div>
+          <div id="terminal"></div>
+          <div id="code-area"></div>
+          <div id="result-banner"></div>
+          <div id="actions" class="level-actions"></div>
+        </div>
+      </section>
+    </div>
+
+    <footer id="footer">
+      <kbd>1</kbd>–<kbd>6</kbd> 选关 · <kbd>L</kbd> 查日志 · <kbd>C</kbd> 看配置 · <kbd>F</kbd> 修复 · <kbd>E</kbd> 利用 · <kbd>N</kbd> 下一关
+    </footer>
+  </div>
+
+  <!-- Ending screen -->
+  <div id="screen-ending" class="screen">
+    <div id="ending-art">🏙️</div>
+    <h2 id="ending-title">结局</h2>
+    <p id="ending-body"></p>
+    <div id="ending-stats"></div>
+    <div id="actions">
+      <button class="primary" id="btn-restart" type="button">再来一次</button>
+    </div>
+  </div>
+
+  <script type="module" src="js/game.js"></script>
+</body>
+</html>
