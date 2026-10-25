@@ -63,7 +63,7 @@ function startGame(fresh = false) {
   else state = loadState() || saved || state;
   player = new Player(state.player);
   // Old or manually edited positions must never strand the player inside scenery.
-  if (isBlocked(player.x, player.y, state) || isBlocked(player.x + 8, player.y + 8, state) || isBlocked(player.x - 8, player.y - 8, state)) player = new Player();
+  if ([[0,0],[-8,-8],[-8,8],[8,-8],[8,8]].some(([dx,dy]) => isBlocked(player.x + dx, player.y + dy, state))) player = new Player();
   mode = 'playing';
   keys.clear();
   pendingInteraction = null;
@@ -438,7 +438,7 @@ document.addEventListener('keydown', (event) => {
 });
 document.addEventListener('keyup', (event) => keys.delete(event.code));
 window.addEventListener('blur', () => { keys.clear(); player.stop(); pendingInteraction = null; persist(); });
-document.addEventListener('visibilitychange', () => { if (document.hidden) { keys.clear(); persist(); } previousTime = performance.now(); });
+document.addEventListener('visibilitychange', () => { if (document.hidden) { keys.clear(); player.stop(); pendingInteraction = null; persist(); } previousTime = performance.now(); });
 window.addEventListener('pagehide', persist);
 for (const button of document.querySelectorAll('[data-move]')) {
   button.addEventListener('pointerdown', (event) => { if (modalOpen()) return; event.preventDefault(); button.setPointerCapture(event.pointerId); keys.add(button.dataset.move); pendingInteraction = null; });
@@ -447,7 +447,8 @@ for (const button of document.querySelectorAll('[data-move]')) {
 
 function resize() {
   const bounds = canvas.getBoundingClientRect();
-  const logicalHeight = 600;
+  // Short landscape screens keep actors readable instead of shrinking the whole town.
+  const logicalHeight = Math.max(320, Math.min(600, Math.round(bounds.height / 2) * 2));
   renderer.resize(Math.round(logicalHeight * bounds.width / bounds.height), logicalHeight);
 }
 new ResizeObserver(resize).observe($('.game-frame'));

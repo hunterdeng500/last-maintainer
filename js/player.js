@@ -6,6 +6,11 @@ const RADIUS = 8;
 const GRID = 16;
 const COLS = WIDTH / GRID;
 const ROWS = HEIGHT / GRID;
+const WALK_SPEED = 105;
+const RUN_SPEED = 175;
+const ACCELERATION_TIME = 0.1;
+const BRAKING = 2400;
+const STRIDE_LENGTH = 32;
 const DIRECTIONS = [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [-1, 1], [1, -1], [-1, -1]];
 
 function canStand(x, y, state) {
@@ -17,7 +22,7 @@ function canStand(x, y, state) {
     && !isBlocked(x + RADIUS, y + RADIUS, state);
 }
 
-function clearLine(ax, ay, bx, by, state) {
+function clearLine(ax, ay, bx, by, state, checkCorners = true) {
   const steps = Math.max(1, Math.ceil(Math.hypot(bx - ax, by - ay) / 4));
   let previousX = ax;
   let previousY = ay;
@@ -27,11 +32,55 @@ function clearLine(ax, ay, bx, by, state) {
     const y = ay + (by - ay) * part;
     // Check the swept rectangle, including both off-diagonal corners. Merely
     // sampling a diagonal can miss the thin slice where it clips a riverbank.
-    if (!canStand(x, y, state) || !canStand(previousX, y, state) || !canStand(x, previousY, state)) return false;
+    if (!canStand(x, y, state) || (checkCorners && (!canStand(previousX, y, state) || !canStand(x, previousY, state)))) return false;
     previousX = x;
     previousY = y;
   }
   return true;
+}
+
+function accelerate(speed, target, elapsed) {
+  const rate = target > speed ? target / ACCELERATION_TIME : BRAKING;
+  const duration = Math.min(elapsed, Math.abs(target - speed) / rate);
+  const next = duration < elapsed ? target : speed + Math.sign(target - speed) * rate * duration;
+  // Integrate the ramp and any time at full speed separately, so the same
+  // input travels the same distance at 30, 60, and 120 frames per second.
+  return { speed: next, distance: (speed + next) * duration / 2 + next * (elapsed - duration) };
+}
+
+function slide(player, dx, dy, state) {
+  const steps = Math.max(1, Math.ceil(Math.max(Math.abs(dx), Math.abs(dy)) / 4));
+  let blockedX = false;
+  let blockedY = false;
+  let distance = 0;
+  const advance = (axis, amount) => {
+    const start = player[axis];
+    const clear = part => clearLine(player.x, player.y,
+      axis === 'x' ? start + amount * part : player.x,
+      axis === 'y' ? start + amount * part : player.y, state);
+    if (clear(1)) {
+      player[axis] += amount;
+      return false;
+    }
+    // Reach the wall without leaving a speed-dependent gap or crossing it.
+    let low = 0;
+    let high = 1;
+    for (let i = 0; i < 12; i += 1) {
+      const middle = (low + high) / 2;
+      if (clear(middle)) low = middle;
+      else high = middle;
+    }
+    player[axis] += amount * low;
+    return true;
+  };
+  for (let step = 0; step < steps; step += 1) {
+    const beforeX = player.x;
+    const beforeY = player.y;
+    if (dx && !blockedX) blockedX = advance('x', dx / steps);
+    if (dy && !blockedY) blockedY = advance('y', dy / steps);
+    distance += Math.hypot(player.x - beforeX, player.y - beforeY);
+  }
+  return { distance, blockedX, blockedY };
 }
 
 const cellPoint = (index) => ({ x: (index % COLS) * GRID + GRID / 2, y: Math.floor(index / COLS) * GRID + GRID / 2 });
@@ -170,6 +219,13 @@ export class Player {
     this.y = Number.isFinite(position?.y) ? Math.max(RADIUS, Math.min(HEIGHT - RADIUS, position.y)) : 590;
     this.facing = 'down';
     this.moving = false;
+    this.velocityX = 0;
+    this.velocityY = 0;
+    this.stride = 0; // Radians, advanced by distance actually travelled.
+    this.sprinting = false;
+    this._speed = 0;
+    this._headingX = 0;
+    this._headingY = 0;
     this.target = null;
     this.route = [];
   }
@@ -193,12 +249,19 @@ export class Player {
     this.target = null;
     this.route = [];
     this.moving = false;
+    this.sprinting = false;
+    this.velocityX = 0;
+    this.velocityY = 0;
+    this._speed = 0;
+    this._headingX = 0;
+    this._headingY = 0;
   }
 
   update(dt, keys, state) {
     const elapsed = Number.isFinite(dt) ? Math.max(0, Math.min(dt, 0.05)) : 0;
-    this.moving = false;
     if (!elapsed) return;
+    this.moving = false;
+    this.sprinting = false;
     const pressed = (...names) => names.some((name) => keys?.has?.(name));
     const right = pressed('KeyD', 'ArrowRight', 'd', 'keyd', 'arrowright');
     const left = pressed('KeyA', 'ArrowLeft', 'a', 'keya', 'arrowleft');
@@ -207,59 +270,74 @@ export class Player {
     let dx = Number(right) - Number(left);
     let dy = Number(down) - Number(up);
     const manual = right || left || down || up;
-    const speed = pressed('ShiftLeft', 'ShiftRight', 'Shift', 'shift', 'shiftleft', 'shiftright') ? 175 : 105;
-    let distance = speed * elapsed;
+    const shift = pressed('ShiftLeft', 'ShiftRight', 'Shift', 'shift', 'shiftleft', 'shiftright');
     if (manual) {
-      this.stop();
-    } else {
-      // Never skip a nearly reached corner: even a tiny residual can put the
-      // player's radius outside the next narrow bridge segment.
-      while (this.route.length && Math.hypot(this.route[0].x - this.x, this.route[0].y - this.y) < 0.1) {
-        const waypoint = this.route[0];
-        if (!clearLine(this.x, this.y, waypoint.x, waypoint.y, state)) break;
-        this.x = waypoint.x;
-        this.y = waypoint.y;
-        this.route.shift();
-      }
-      if (!this.route.length) {
+      this.target = null;
+      this.route = [];
+      // Opposite keys cancel a route and brake immediately, with no stale
+      // automatic heading carried into a later release frame.
+      if (!dx && !dy) {
         this.stop();
         return;
       }
-      dx = this.route[0].x - this.x;
-      dy = this.route[0].y - this.y;
-      distance = Math.min(distance, Math.hypot(dx, dy));
+      const length = Math.hypot(dx, dy);
+      this._headingX = dx / length;
+      this._headingY = dy / length;
     }
-    const length = Math.hypot(dx, dy);
-    if (!length) return;
-    dx = (dx / length) * distance;
-    dy = (dy / length) * distance;
-    this.facing = Math.abs(dx) > Math.abs(dy) ? (dx > 0 ? 'right' : 'left') : (dy > 0 ? 'down' : 'up');
-    const beforeX = this.x;
-    const beforeY = this.y;
-    if (manual) {
-      // Keyboard input slides naturally along a building's wall.
-      if (canStand(this.x + dx, this.y, state)) this.x += dx;
-      if (canStand(this.x, this.y + dy, state)) this.y += dy;
-    } else {
-      // A planned diagonal is one segment, not two independent axis moves.
-      // Snap an arriving step to the exact waypoint rather than accumulating
-      // rounding errors at a bridge or building corner.
-      const arrival = distance >= length;
-      const nextX = arrival ? this.route[0].x : this.x + dx;
-      const nextY = arrival ? this.route[0].y : this.y + dy;
-      if (canStand(nextX, nextY, state)) {
+    const followingRoute = !manual && this.route.length > 0;
+    const ramp = accelerate(this._speed, manual || followingRoute ? (shift ? RUN_SPEED : WALK_SPEED) : 0, elapsed);
+    this._speed = ramp.speed;
+    let facingX = this._headingX;
+    let facingY = this._headingY;
+    let travelled = 0;
+    let blockedX = false;
+    let blockedY = false;
+    if (followingRoute) {
+      let remaining = ramp.distance;
+      while (this.route.length && remaining > 0) {
+        const waypoint = this.route[0];
+        dx = waypoint.x - this.x;
+        dy = waypoint.y - this.y;
+        const length = Math.hypot(dx, dy);
+        const arrival = remaining >= length;
+        const distance = Math.min(remaining, length);
+        if (length) {
+          this._headingX = dx / length;
+          this._headingY = dy / length;
+          facingX = this._headingX;
+          facingY = this._headingY;
+        }
+        const nextX = arrival ? waypoint.x : this.x + this._headingX * distance;
+        const nextY = arrival ? waypoint.y : this.y + this._headingY * distance;
+        // The planner already checks swept corners for this entire segment.
+        // Recheck its radius along the step, without imposing new off-diagonal
+        // corners at frame-dependent sample points beside a narrow bridge.
+        if (!clearLine(this.x, this.y, nextX, nextY, state, false)) {
+          this.stop();
+          break;
+        }
         this.x = nextX;
         this.y = nextY;
+        travelled += distance;
+        remaining -= distance;
+        if (arrival) this.route.shift();
+        else break;
       }
+      if (!this.route.length) this.stop();
+    } else if (ramp.distance) {
+      const movement = slide(this, this._headingX * ramp.distance, this._headingY * ramp.distance, state);
+      travelled = movement.distance;
+      blockedX = movement.blockedX;
+      blockedY = movement.blockedY;
     }
-    this.moving = Math.hypot(this.x - beforeX, this.y - beforeY) > 0.001;
-    if (!manual && !this.moving) this.stop();
-    if (this.target && Math.hypot(this.x - this.target.x, this.y - this.target.y) < 0.1) {
-      if (clearLine(this.x, this.y, this.target.x, this.target.y, state)) {
-        this.x = this.target.x;
-        this.y = this.target.y;
-      }
-      this.stop();
+    this.stride += travelled * Math.PI * 2 / STRIDE_LENGTH;
+    this.moving = travelled > 0.000001 && this._speed > 0;
+    this.sprinting = this.moving && shift;
+    this.velocityX = blockedX || !this._speed ? 0 : this._headingX * this._speed;
+    this.velocityY = blockedY || !this._speed ? 0 : this._headingY * this._speed;
+    if (facingX || facingY) {
+      this.facing = Math.abs(facingX) > Math.abs(facingY)
+        ? (facingX > 0 ? 'right' : 'left') : (facingY > 0 ? 'down' : 'up');
     }
   }
 }
